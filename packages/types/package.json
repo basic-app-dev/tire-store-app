@@ -1,0 +1,21 @@
+{
+  "name": "@tire-store/types",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --import ./test/loader.mjs test/*.test.ts",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@tire-store/typescript-config": "workspace:*",
+    "typescript": "^5.7.2"
+  }
+}

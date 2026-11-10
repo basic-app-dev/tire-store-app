@@ -1,0 +1,27 @@
+{
+  "name": "@tire-store/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --import ./test/loader.mjs test/*.test.ts",
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.47.10",
+    "@tanstack/react-query": "^5.62.7",
+    "@tire-store/types": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@tire-store/typescript-config": "workspace:*",
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1",
+    "typescript": "^5.7.2"
+  }
+}

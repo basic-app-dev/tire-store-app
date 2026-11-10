@@ -1,0 +1,30 @@
+{
+  "name": "tire-store-app",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:web": "pnpm --filter @tire-store/web dev",
+    "dev:mobile": "pnpm --filter @tire-store/mobile dev",
+    "dev:api": "pnpm --filter @tire-store/api dev",
+    "lint": "turbo run lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "db:deploy": "pnpm --filter @tire-store/db run db:deploy",
+    "db:seed": "pnpm --filter @tire-store/db run db:seed",
+    "db:verify": "pnpm --filter @tire-store/db run db:verify",
+    "db:studio": "pnpm --filter @tire-store/db run db:studio",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2"
+  }
+}
+

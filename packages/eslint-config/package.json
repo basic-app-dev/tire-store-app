@@ -1,0 +1,13 @@
+{
+  "name": "@tire-store/eslint-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared ESLint configurations and boundary enforcement for Tire Store monorepo",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "apps.js",
+    "next.js",
+    "react.js"
+  ]
+}

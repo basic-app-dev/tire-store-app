@@ -1,0 +1,11 @@
+{
+  "name": "@tire-store/typescript-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared TypeScript configurations across Tire Store monorepo workspaces",
+  "files": [
+    "base.json",
+    "nextjs.json",
+    "react-library.json"
+  ]
+}

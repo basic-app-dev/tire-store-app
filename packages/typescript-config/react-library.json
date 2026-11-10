@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "Tire Store React Library",
+  "extends": "./base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  },
+  "exclude": ["node_modules", "dist"]
+}
