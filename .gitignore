@@ -52,5 +52,9 @@ Thumbs.db
 # Agents
 .agents/
 
+# TypeScript & Next.js auto-generated files
+*.tsbuildinfo
+next-env.d.ts
+
 # Others
 .vscode/

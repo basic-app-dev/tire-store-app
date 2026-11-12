@@ -1,0 +1,21 @@
+.header { position: relative; z-index: 50; background: #fff; border-bottom: 1px solid #e5e5e5; color: #202020; }
+.inner { height: 79px; width: 100%; padding: 0 32px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 28px; }
+.brand { justify-self: start; font-size: 20px; font-weight: 700; letter-spacing: -0.8px; white-space: nowrap; }
+.brand span { color: #8b1e25; }
+.nav { display: flex; align-items: center; justify-content: center; gap: 24px; }
+.nav a, .nav button { border: 0; padding: 10px 0; background: transparent; color: #202020; font-size: 13px; font-weight: 400; white-space: nowrap; line-height: 1.5; }
+.nav a:hover, .nav button:hover { text-decoration: underline; text-underline-offset: 5px; }
+.nav a[aria-current='page'] { text-decoration: underline; text-underline-offset: 5px; }
+.actions { display: flex; align-items: center; justify-self: end; gap: 12px; }
+.cart { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; color: #000; }
+.toggle { display: none; background: transparent; border: 0; width: 44px; height: 44px; align-items: center; justify-content: center; }
+.dialog { padding: 32px; max-width: min(480px, calc(100% - 40px)); border: 1px solid #e5e5e5; border-radius: 6px; color: #202020; }
+.dialog::backdrop { background: #0006; }
+@media (max-width: 1100px) {
+  .inner { grid-template-columns: 1fr auto; padding: 0 20px; gap: 12px; }
+  .toggle { display: flex; }
+  .nav { display: none; position: absolute; top: 79px; left: 0; right: 0; padding: 16px 20px 24px; flex-direction: column; align-items: stretch; gap: 4px; background: white; border-bottom: 1px solid #e5e5e5; }
+  .nav.open { display: flex; }
+  .nav a, .nav button { padding: 12px 0; text-align: left; font-size: 14px; }
+}
+@media (max-width: 360px) { .brand { font-size: 18px; } .actions { gap: 0; } }
