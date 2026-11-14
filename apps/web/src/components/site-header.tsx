@@ -3,10 +3,10 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { Menu, X, ShoppingCart } from 'lucide-react';
+import { ShopProductsMenu } from './shop-products-menu';
 import styles from './site-header.module.css';
 
 const links = [
-  ['Shop Products', '/catalog'],
   ['Services', '/services'],
   ['Why Choose Steven?', '/#main'],
 ] as const;
@@ -14,6 +14,7 @@ const links = [
 export function SiteHeader() {
   const path = usePathname();
   const [open, setOpen] = useState(false);
+  const [shopOpen, setShopOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const financing = useRef<HTMLDialogElement>(null);
   return (
@@ -26,6 +27,8 @@ export function SiteHeader() {
       <div className={styles.inner}>
         <Link className={styles.brand} href="/" onClick={() => setOpen(false)}>Steven Mechanics<span>.</span></Link>
         <nav id="main-nav" aria-label="Main navigation" className={`${styles.nav} ${open ? styles.open : ''}`}>
+          <button type="button" aria-expanded={shopOpen} aria-controls="shop-products" onClick={() => setShopOpen(!shopOpen)}>Shop Products</button>
+          {shopOpen && <ShopProductsMenu onNavigate={() => { setShopOpen(false); setOpen(false); }} />}
           {links.map(([name, url]) => (
             <Link key={url} href={url} onClick={() => setOpen(false)} aria-current={url !== '/#main' && (path === url || path.startsWith(`${url}/`)) ? 'page' : undefined}>{name}</Link>
           ))}
