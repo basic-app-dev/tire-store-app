@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: automotive-product
+  labels:
+    app.kubernetes.io/name: automotive-product
+    app.kubernetes.io/part-of: tire-store
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8092
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: automotive-product

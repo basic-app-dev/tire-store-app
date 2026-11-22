@@ -1,0 +1,28 @@
+# ==============================================================================
+# Expo Mobile Application (.gitignore)
+# Path: apps/mobile/.gitignore
+# ==============================================================================
+
+# Expo & Metro build caches
+.expo/
+web-build/
+__generated__/
+metro-cache/
+
+# Mobile keystores, signing keys & provisioning profiles (Secrets)
+*.jks
+*.p8
+*.p12
+*.key
+*.keystore
+*.mobileprovision
+*.orig.*
+
+# Expo prebuild outputs (if generated)
+.expo-prebuild/
+.expo-prebuild-android/
+
+# TypeScript cache
+*.tsbuildinfo
+.cache/
+.turbo/

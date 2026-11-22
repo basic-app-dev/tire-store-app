@@ -1,0 +1,168 @@
+name: tire-store
+
+networks:
+  tire-store-net:
+    driver: bridge
+
+services:
+  automotive-operations:
+    container_name: tire-store-automotive-operations
+    image: tire-store/automotive-operations:latest
+    build:
+      context: ../../backend/services/automotive-operations
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8091/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  automotive-product:
+    container_name: tire-store-automotive-product
+    image: tire-store/automotive-product:latest
+    build:
+      context: ../../backend/services/automotive-product
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8092"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8092/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  vehicle-sales:
+    container_name: tire-store-vehicle-sales
+    image: tire-store/vehicle-sales:latest
+    build:
+      context: ../../backend/services/vehicle-sales
+      dockerfile: Dockerfile
+    ports:
+      - "8093:8093"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8093/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  vehicle-product:
+    container_name: tire-store-vehicle-product
+    image: tire-store/vehicle-product:latest
+    build:
+      context: ../../backend/services/vehicle-product
+      dockerfile: Dockerfile
+    ports:
+      - "8094:8094"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8094/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  notification:
+    container_name: tire-store-notification
+    image: tire-store/notification:latest
+    build:
+      context: ../../backend/services/notification
+      dockerfile: Dockerfile
+    ports:
+      - "8095:8095"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8095/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  identity-access:
+    container_name: tire-store-identity-access
+    image: tire-store/identity-access:latest
+    build:
+      context: ../../backend/services/identity-access
+      dockerfile: Dockerfile
+    ports:
+      - "8096:8096"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8096/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  appointment:
+    container_name: tire-store-appointment
+    image: tire-store/appointment:latest
+    build:
+      context: ../../backend/services/appointment
+      dockerfile: Dockerfile
+    ports:
+      - "8097:8097"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8097/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  store-management:
+    container_name: tire-store-store-management
+    image: tire-store/store-management:latest
+    build:
+      context: ../../backend/services/store-management
+      dockerfile: Dockerfile
+    ports:
+      - "8098:8098"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8098/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  web:
+    container_name: tire-store-web
+    image: tire-store/web:latest
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - tire-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

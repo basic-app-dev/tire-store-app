@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - services/automotive-operations
+  - services/automotive-product
+  - services/vehicle-sales
+  - services/vehicle-product
+  - services/notification
+  - services/identity-access
+  - services/appointment
+  - services/store-management
+  - web

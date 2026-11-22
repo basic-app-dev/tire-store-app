@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: tire-store
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+images:
+  - name: tire-store/automotive-operations
+    newName: tire-store/automotive-operations
+    newTag: dev-local
+  - name: tire-store/automotive-product
+    newName: tire-store/automotive-product
+    newTag: dev-local
+  - name: tire-store/vehicle-sales
+    newName: tire-store/vehicle-sales
+    newTag: dev-local
+  - name: tire-store/vehicle-product
+    newName: tire-store/vehicle-product
+    newTag: dev-local
+  - name: tire-store/notification
+    newName: tire-store/notification
+    newTag: dev-local
+  - name: tire-store/identity-access
+    newName: tire-store/identity-access
+    newTag: dev-local
+  - name: tire-store/appointment
+    newName: tire-store/appointment
+    newTag: dev-local
+  - name: tire-store/store-management
+    newName: tire-store/store-management
+    newTag: dev-local
+  - name: tire-store/web
+    newName: tire-store/web
+    newTag: dev-local

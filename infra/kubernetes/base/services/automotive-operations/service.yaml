@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: automotive-operations
+  labels:
+    app.kubernetes.io/name: automotive-operations
+    app.kubernetes.io/part-of: tire-store
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8091
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: automotive-operations

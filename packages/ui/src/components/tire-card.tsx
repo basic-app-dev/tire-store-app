@@ -1,5 +1,5 @@
 import * as React from 'react';
-import type { TireProduct } from '@tire-store/types';
+import type { TireProduct } from '@tire-store/api-client';
 import { Card, CardContent, CardFooter } from './card';
 import { Badge } from './badge';
 import { Button } from './button';

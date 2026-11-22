@@ -22,12 +22,13 @@ The `@ui-designer` creates cross-platform UI primitives, implements Tailwind sty
    - Design tokens: typography scale, automotive color palette, spacing, shadows.
    - Responsive layouts across mobile, tablet, and desktop breakpoints.
    - Dark mode and contrast compliance.
+   - NativeWind compatibility for React Native / Expo screens.
 3. **Accessibility (WCAG 2.1 AA)**:
    - Full keyboard navigation, ARIA live regions, color contrast verification, and screen reader labels.
 
 ---
 
-## 2. Typical Prompts & Tasks
+## 2. Typical Prompts & Tasks (Illustrative)
 
 - _"@ui-designer design a responsive vehicle fitment selector component in packages/ui."_
 - _"@ui-designer audit the color contrast and keyboard navigation for the checkout form."_

@@ -1,0 +1,25 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: tire-store-api-gateway
+  namespace: ingress-apisix
+  labels:
+    app.kubernetes.io/name: tire-store-api-gateway
+    app.kubernetes.io/part-of: tire-store
+spec:
+  gatewayClassName: tire-store-apisix
+  infrastructure:
+    parametersRef:
+      group: apisix.apache.org
+      kind: GatewayProxy
+      name: apisix-config
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/part-of: tire-store

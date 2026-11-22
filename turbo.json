@@ -2,10 +2,6 @@
   "$schema": "https://turbo.build/schema.json",
   "ui": "tui",
   "globalEnv": [
-    "DATABASE_URL",
-    "NEXT_PUBLIC_SUPABASE_URL",
-    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-    "SUPABASE_SERVICE_ROLE_KEY",
     "NODE_ENV"
   ],
   "tasks": {
@@ -24,7 +20,7 @@
     },
     "typecheck": {
       "dependsOn": ["^build"],
-      "inputs": ["src/**", "test/**", "tsconfig.json", "tsconfig.*.json", "drizzle.config.ts"]
+      "inputs": ["src/**", "test/**", "tsconfig.json", "tsconfig.*.json"]
     },
     "test": {
       "dependsOn": ["^build"],

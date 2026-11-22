@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: notification
+
+server:
+  port: 8095
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true

@@ -17,7 +17,8 @@ The `@scout` agent handles rapid codebase audits, style and linting fixes, docum
 
 1. **Workspace Inspection**:
    - Fast searches across files and symbols in the monorepo.
-   - Enforcing workspace boundary rules (preventing client app direct imports of `@tire-store/db`).
+   - Enforcing workspace boundary rules (verifying database isolation and zero cross-service Gradle dependencies).
+   - Validating independent Gradle builds across all eight Spring Boot services.
 2. **Linting & Code Formatting**:
    - Running ESLint and Prettier, fixing styling errors automatically.
    - Verifying Markdown syntax, table alignments, code blocks, and Mermaid diagrams.
@@ -29,8 +30,8 @@ The `@scout` agent handles rapid codebase audits, style and linting fixes, docum
 
 ---
 
-## 2. Typical Prompts & Tasks
+## 2. Typical Prompts & Tasks (Illustrative)
 
 - _"@scout inspect the newly created components for missing type exports and lint errors."_
 - _"@scout verify that all commits on branch feat/TIRE-104 follow the Jira TIRE-xxx naming standard."_
-- _"@scout check markdown formatting and table alignment in docs/architecture/."_
+- _"@scout verify that none of the Spring Boot services contain local cross-project dependencies."_

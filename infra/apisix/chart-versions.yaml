@@ -1,0 +1,28 @@
+apisix:
+  chart: "3.1.0"
+  appVersion: "3.21.0"
+  repository: "https://charts.apiseven.com"
+
+ingressController:
+  chart: "1.5.0"
+  appVersion: "2.2.0"
+
+adc:
+  version: "0.27.1"
+  image: "ghcr.io/api7/adc:0.27.1"
+
+gatewayAPI:
+  version: "v1.2.1"
+  channel: "standard"
+  source: "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml"
+
+compatibility:
+  kubernetes: "1.32.2"
+  cluster: "tire-store-local"
+  context: "kind-tire-store-local"
+  mode: "traditional-etcd"
+  etcd:
+    enabled: true
+    replicaCount: 1
+    persistence: false
+    rationale: "APISIX Ingress Controller v2.2.0 uses ADC 0.27.1 sidecar which requires the CRUD Admin API (/apisix/admin/routes). In APISIX 3.21.0, standalone YAML mode returns 404 to route queries and causes a readiness probe deadlock."

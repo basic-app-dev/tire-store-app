@@ -1,0 +1,56 @@
+# ==============================================================================
+# Infrastructure & Deployment (.gitignore)
+# Path: infra/.gitignore
+# ==============================================================================
+
+# Local kubeconfig exports and credentials (scoped to credential extensions)
+kubeconfig
+*.kubeconfig
+*kubeconfig.yaml
+*kubeconfig.yml
+!*kubeconfig*.md
+
+# Helm temporary archives and rendered outputs
+*.tgz
+.helm/
+/charts/
+.charts/
+helm-rendered*.yaml
+
+# Local diagnostic dumps and state exports
+diagnostic-*.yaml
+*-dump.json
+*-dump.yaml
+cluster-state/
+
+# Local SSL/TLS private keys, CSRs, and certificates
+*.crt
+*.csr
+*.key
+*.pem
+*.pfx
+*.p12
+!*.example.crt
+!*.example.key
+!*.example.pem
+!*.sample.crt
+!*.sample.pem
+
+# Local secret manifests and credential overrides
+*-secret.yaml
+*-secret.yml
+values-local-secret*.yaml
+values-secret*.yaml
+*.local-secret.yaml
+!*-secret.example.yaml
+!*-secret.example.yml
+!*-secret.sample.yaml
+!*-secret.template.yaml
+!*secret*.md
+
+# Explicitly track sanitized local templates and configurations
+!values-local.yaml
+!chart-versions.yaml
+!kind/cluster.yaml
+!base/**/*.yaml
+!overlays/**/*.yaml

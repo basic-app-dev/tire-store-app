@@ -7,13 +7,11 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types --import ./test/loader.mjs test/*.test.ts",
+    "test": "node --test test/*.test.ts",
     "lint": "eslint . --ext .ts,.tsx"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.47.10",
-    "@tanstack/react-query": "^5.62.7",
-    "@tire-store/types": "workspace:*"
+    "@tanstack/react-query": "^5.62.7"
   },
   "peerDependencies": {
     "react": "^18.3.1 || ^19.0.0"

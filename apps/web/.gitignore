@@ -1,0 +1,36 @@
+# ==============================================================================
+# Next.js Web Application (.gitignore)
+# Path: apps/web/.gitignore
+# ==============================================================================
+
+# Next.js build outputs
+.next/
+out/
+build/
+dist/
+
+# Next.js auto-generated TypeScript declarations
+next-env.d.ts
+*.tsbuildinfo
+
+# Next.js local environment overrides
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+!.env.sample
+
+# Build caches & compiler artifacts
+.cache/
+.eslintcache
+.swc/
+.turbo/
+
+# Testing & E2E artifacts
+coverage/
+playwright-report/
+test-results/
+
+# Vercel deployment cache
+.vercel/

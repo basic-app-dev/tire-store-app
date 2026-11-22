@@ -1,0 +1,11 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: tire-store-apisix
+spec:
+  controllerName: apisix.apache.org/apisix-ingress-controller
+  parametersRef:
+    group: apisix.apache.org
+    kind: GatewayProxy
+    name: apisix-config
+    namespace: ingress-apisix

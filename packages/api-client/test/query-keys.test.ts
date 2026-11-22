@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { queryKeys } from '../src/query-keys';
+import { queryKeys } from '../src/query-keys.ts';
 
 describe('Query Key Factories', () => {
   it('generates consistent keys for tire searches', () => {

@@ -1,0 +1,18 @@
+# ==============================================================================
+# Service-Oriented Scripts (.gitignore)
+# Path: scripts/.gitignore
+# ==============================================================================
+
+# Runtime process metadata and execution logs
+*.pid
+*.log
+*.tmp
+.logs/
+.temp/
+tmp/
+
+# Explicitly ensure all script files and documentation remain tracked
+!*.sh
+!*/*.sh
+!README.md
+!lib/common.sh

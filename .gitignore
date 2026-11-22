@@ -1,60 +1,106 @@
-# Dependencies
+# ==============================================================================
+# Tire Store Platform — Root Git Ignore Configuration
+# Layer: Repository-Wide (OS, Editors, Monorepo Tooling, Env, Logs)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Operating System Artifacts
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# ------------------------------------------------------------------------------
+# 2. General Editor & IDE Artifacts
+# ------------------------------------------------------------------------------
+# JetBrains (IntelliJ IDEA, WebStorm, Android Studio)
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Visual Studio Code local workspace state
+.vscode/
+
+# Temporary & Swap files
+*.swp
+*.swo
+*.swn
+*.bak
+*.patch
+*.diff
+
+# ------------------------------------------------------------------------------
+# 3. Environment & Secrets (Root & Monorepo Defaults)
+# ------------------------------------------------------------------------------
+.env
+.env.*
+.env*.local
+!.env.example
+!.env.sample
+
+# Private keys and certificates
+*.pem
+*.key
+*.cert
+*.crt
+
+# ------------------------------------------------------------------------------
+# 4. Monorepo Dependencies & Tooling (pnpm & Turborepo)
+# ------------------------------------------------------------------------------
 node_modules/
 .pnpm-store/
+.pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Turborepo
+# Turborepo cache
 .turbo/
 
-# Build outputs
-.next/
+# Shared build outputs
 dist/
 build/
 out/
 
-# Mobile (Expo / React Native)
-.expo/
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-*.orig.*
+# TypeScript composite build info
+*.tsbuildinfo
 
-# Environment variables
-.env
-.env.*
-!.env.example
+# ------------------------------------------------------------------------------
+# 5. Logs, Runtime PIDs, and Diagnostics
+# ------------------------------------------------------------------------------
+.logs/
+*.log
+*.pid
 
-# Testing & Coverage
+# ------------------------------------------------------------------------------
+# 6. Testing & Coverage Outputs
+# ------------------------------------------------------------------------------
 coverage/
+.nyc_output/
 playwright-report/
 test-results/
-.nyc_output/
 
-# Logs & Runtime PIDs
-*.log
-.logs/
-*.pid
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# Supabase Local
-supabase/.temp/
-
-# OS / Editor Files
-.DS_Store
-*.pem
-Thumbs.db
-*.swp
-
-# Agents
+# ------------------------------------------------------------------------------
+# 7. Local Agent Harness & Workspace Metadata
+# ------------------------------------------------------------------------------
 .agents/
-
-# TypeScript & Next.js auto-generated files
-*.tsbuildinfo
-next-env.d.ts
-
-# Others
-.vscode/

@@ -1,0 +1,76 @@
+# Apache APISIX Local Development Values for Tire-Store-App
+# Pinned for kind local cluster (tire-store-local)
+
+apisix:
+  deployment:
+    mode: traditional
+    role: traditional
+    role_traditional:
+      config_provider: etcd
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+service:
+  type: ClusterIP
+  http:
+    enabled: true
+    servicePort: 80
+    containerPort: 9080
+  tls:
+    enabled: false
+
+admin:
+  enabled: true
+  type: ClusterIP
+  ip: 0.0.0.0
+  port: 9180
+  servicePort: 9180
+  cors: false
+  allow:
+    ipList:
+      - 127.0.0.1/24
+    ingressControllerExtraIpList:
+      - 0.0.0.0/0
+      - "::/0"
+  ingress:
+    enabled: false
+
+# Minimal single-replica ephemeral etcd for local development
+# Note: APISIX Ingress Controller v2.2.0 (via ADC 0.27.1) requires the CRUD Admin API
+# (/apisix/admin/routes) which is only exposed with etcd config provider.
+etcd:
+  enabled: true
+  replicaCount: 1
+  persistence:
+    enabled: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# APISIX Ingress Controller subchart configuration
+ingress-controller:
+  enabled: true
+  crds:
+    gatewayAPI:
+      # Official Gateway API CRDs v1.2.1 are managed cluster-wide via scripts/gateway/install.sh
+      enabled: false
+  config:
+    controllerName: apisix.apache.org/apisix-ingress-controller
+    disableGatewayAPI: false
+    listenerPortMatchMode: "off"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

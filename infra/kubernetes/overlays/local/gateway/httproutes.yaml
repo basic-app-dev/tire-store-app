@@ -1,0 +1,70 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tire-store-backend-routes
+  namespace: tire-store
+  labels:
+    app.kubernetes.io/name: tire-store-backend-routes
+    app.kubernetes.io/part-of: tire-store
+spec:
+  parentRefs:
+    - name: tire-store-api-gateway
+      namespace: ingress-apisix
+      sectionName: http
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/automotive/operations
+      backendRefs:
+        - name: automotive-operations
+          port: 8091
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/automotive/products
+      backendRefs:
+        - name: automotive-product
+          port: 8092
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/vehicles/sales
+      backendRefs:
+        - name: vehicle-sales
+          port: 8093
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/vehicles/products
+      backendRefs:
+        - name: vehicle-product
+          port: 8094
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/notifications
+      backendRefs:
+        - name: notification
+          port: 8095
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/identity
+      backendRefs:
+        - name: identity-access
+          port: 8096
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/appointments
+      backendRefs:
+        - name: appointment
+          port: 8097
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/stores
+      backendRefs:
+        - name: store-management
+          port: 8098

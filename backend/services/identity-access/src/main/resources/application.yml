@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: identity-access
+
+server:
+  port: 8096
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true

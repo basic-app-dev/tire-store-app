@@ -1,202 +1,300 @@
-# 🏎️ Tire Store App — Monorepo Architecture & Command Reference
+# 🏎️ Automotive Platform — Monorepo Architecture & Development Guide
 
-> **Architectural Blueprint**: Scalable Monorepo powered by **Turborepo**, **pnpm**, **Next.js 14+ (App Router)**, **Expo (React Native)**, and **Supabase (PostgreSQL + PostGIS + Drizzle ORM)**.
+> **Primary Monorepo Reference**: Comprehensive architecture, workspace boundaries, command reference, and onboarding guide for the Automotive Platform.
 
 ---
 
-## 1. Directory Tree & Architecture Overview
+## 1. Component Status Legend
 
-```
+Every directory, package, service, and command in this guide is categorized into one of two statuses:
+
+- **`[EXISTING]`**: Verified codebase components, packages, and working developer commands currently active in the repository.
+- **`[PLANNED]`**: Approved target domain features to be implemented in upcoming phases (e.g., domain entities/repositories for Spring Boot microservices, Apache APISIX gateway, Keycloak integration, RabbitMQ messaging).
+
+---
+
+## 2. Monorepo Architecture & Directory Layout
+
+The repository utilizes a dual build architecture:
+1. **pnpm + Turborepo**: Manages TypeScript client applications (`apps/web`, `apps/mobile`) and shared TypeScript packages (`packages/*`).
+2. **Eight Standalone Gradle Projects**: Each Spring Boot microservice under `backend/services/*` maintains its own dedicated Gradle Wrapper, `settings.gradle.kts`, and `build.gradle.kts`. There is no centralized root Gradle build.
+
+```text
 tire-store-app/
-├── apps/
-│   ├── web/                     # 🌐 Next.js 14+ App Router (Web Customer Portal & Admin)
-│   │   ├── src/
-│   │   │   ├── app/
-│   │   │   │   ├── layout.tsx   # Root layout with header, navigation & providers
-│   │   │   │   ├── page.tsx     # Landing page (Hero search, fitment selector, featured tires)
-│   │   │   │   ├── catalog/     # Tire catalog (filter by size, season, brand, warranty)
-│   │   │   │   ├── stores/      # PostGIS Store Locator (radius search & service bays)
-│   │   │   │   ├── checkout/    # Dynamic bay scheduling & atomic checkout
-│   │   │   │   └── admin/       # Live Store Portal & Technician Bay Management
-│   │   │   └── globals.css      # Automotive design tokens & Tailwind styles
-│   │   ├── next.config.mjs      # Transpilation for shared monorepo packages
-│   │   ├── tailwind.config.ts   # Uses @tire-store/tailwind-config preset
-│   │   ├── tsconfig.json        # Extends @tire-store/typescript-config/nextjs.json
-│   │   └── package.json         # @tire-store/web
-│   │
-│   ├── mobile/                  # 📱 Expo SDK 52+ / React Native (iOS & Android)
-│   │   ├── src/
-│   │   │   └── app/
-│   │   │       ├── _layout.tsx           # Root navigation stack & QueryClientProvider
-│   │   │       ├── (tabs)/
-│   │   │       │   ├── _layout.tsx       # Bottom tab bar (Fitment, Tires, Stores, My Bays)
-│   │   │       │   ├── index.tsx         # Mobile home with fitment search & door jamb scanner
-│   │   │       │   ├── catalog.tsx       # Mobile tire catalog list
-│   │   │       │   ├── stores.tsx        # GPS nearby store locator
-│   │   │       │   └── appointments.tsx  # Confirmed bay booking passes
-│   │   │       ├── scan-vin.tsx          # Camera scanner modal (VIN barcode / tire spec)
-│   │   │       └── checkout.tsx          # Mobile bay booking & checkout screen
-│   │   ├── app.json             # Expo configuration (permissions: GPS, Camera)
-│   │   ├── metro.config.js      # Monorepo workspace resolver
-│   │   ├── babel.config.js      # Expo Babel preset
-│   │   └── package.json         # @tire-store/mobile
-│   │
-│   └── api/                     # ⚙️ Dedicated Node.js Backend API Server (Port 4000)
-│       ├── src/
-│       │   └── index.ts         # REST API server (Fitments, Tires, PostGIS Stores, Bay Calc)
-│       ├── tsconfig.json        # Extends @tire-store/typescript-config/base.json
-│       └── package.json         # @tire-store/api
+├── backend/
+│   └── services/                         # [EXISTING] Eight Standalone Spring Boot 4.2.x Microservices (Java 25 LTS)
+│       ├── automotive-operations/        # Port 8091 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── automotive-product/           # Port 8092 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── vehicle-sales/                # Port 8093 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── vehicle-product/              # Port 8094 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── notification/                 # Port 8095 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── identity-access/              # Port 8096 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       ├── appointment/                  # Port 8097 (settings.gradle.kts, build.gradle.kts, gradlew)
+│       └── store-management/             # Port 8098 (settings.gradle.kts, build.gradle.kts, gradlew)
 │
-├── scripts/                     # 🚀 Executable Shell Automation Scripts
-│   ├── start-all.sh             # Launches both backend & frontend in background
-│   ├── stop-all.sh              # Gracefully stops all active services
-│   ├── start-backend.sh         # Starts apps/api on port 4000 (background or -f)
-│   ├── stop-backend.sh          # Stops apps/api and frees port 4000
-│   ├── start-frontend.sh        # Starts apps/web on port 3000 (background or -f)
-│   ├── stop-frontend.sh         # Stops apps/web and frees port 3000
-│   ├── status.sh                # Inspects live health of all ports (4000, 3000, 8081)
-│   └── db.sh                    # CLI for deploy, seed, verify & drizzle studio
+├── apps/
+│   ├── web/                              # [EXISTING] Next.js 14+ App Router (Port 3000)
+│   │   ├── src/app/                      # Web storefront, tire catalog, fitment selector, admin
+│   │   └── package.json                  # @tire-store/web
+│   │
+│   └── mobile/                           # [EXISTING] Expo SDK 52+ / React Native (Metro Port 8081)
+│       ├── src/app/                      # Mobile storefront, technician VIN scanner, GPS locator
+│       └── package.json                  # @tire-store/mobile
 │
 ├── packages/
-│   ├── db/                      # 🗄️ Database Layer (Supabase Migrations, Drizzle Schemas, PostGIS)
-│   │   ├── src/
-│   │   │   ├── schema/          # Drizzle ORM schemas (tires, fitments, stores, bays, orders)
-│   │   │   ├── apply-migrations.ts # Automated SQL migration deployer
-│   │   │   ├── seed.ts          # Idempotent database seeder (Top 6 makes, tires, stores, bays)
-│   │   │   └── verify-supabase.ts # Live connectivity, table & RPC status verification
-│   │   └── package.json         # @tire-store/db
-│   │
-│   ├── types/                   # 📐 Shared Zod Schemas & Domain Logic
-│   │   ├── src/
-│   │   │   ├── calculator.ts    # Pure dynamic bay duration calculation engine
-│   │   │   ├── tires.ts         # Tire dimension & spec Zod schemas
-│   │   │   ├── vehicles.ts      # Year/Make/Model/Trim fitment schemas
-│   │   │   ├── stores.ts        # PostGIS store & bay schemas
-│   │   │   ├── appointments.ts  # Bay slot scheduling input/output contracts
-│   │   │   └── orders.ts        # Atomic checkout payloads
-│   │   └── package.json         # @tire-store/types
-│   │
-│   ├── api-client/              # 🔌 Client Data Access Layer (React Query & Supabase Client)
-│   │   ├── src/
-│   │   │   ├── query-keys.ts    # TanStack Query key factory
-│   │   │   └── supabase.ts      # Supabase JS SDK client factory
-│   │   └── package.json         # @tire-store/api-client
-│   │
-│   ├── ui/                      # 🎨 Cross-Platform UI Design System & Primitives
-│   │   ├── src/
-│   │   │   └── components/      # Button, Badge, Card, TireCard
-│   │   └── package.json         # @tire-store/ui
-│   │
-│   ├── tailwind-config/         # 🎨 Shared Automotive Tailwind Design Tokens
-│   │   ├── tokens.js            # asphalt, alloy, raceRed, pitAmber, nitroBlue, certifiedGreen
-│   │   └── tailwind.config.js   # Shared base Tailwind preset
-│   │
-│   ├── typescript-config/       # ⚙️ Shared TypeScript Configs
-│   │   ├── base.json
-│   │   ├── nextjs.json
-│   │   └── react-library.json
-│   │
-│   └── eslint-config/           # 🛡️ Shared ESLint & Boundary Rule Enforcement
-│       └── apps.js              # Forbids @tire-store/db in frontend apps
+│   ├── api-client/                       # [EXISTING] Client models, API fetch client, and React Query hooks
+│   ├── ui/                               # [EXISTING] Cross-platform design system & Tailwind primitives
+│   ├── tailwind-config/                  # [EXISTING] Shared automotive design tokens
+│   ├── typescript-config/                # [EXISTING] Shared tsconfig presets
+│   └── eslint-config/                    # [EXISTING] Monorepo boundary lint rules
 │
-├── supabase/
-│   └── migrations/              # 📜 PostgreSQL DDL & RPC SQL Migrations
-│       ├── 20261108000000_init_postgis_and_rls.sql
-│       ├── 20261108000001_core_tables.sql
-│       ├── 20261108000002_postgis_locator_rpc.sql
-│       ├── 20261108000003_atomic_checkout_rpc.sql
-│       └── 20261108000004_rls_policies.sql
+├── scripts/                              # [EXISTING] Service-oriented shell automation scripts
+│   ├── README.md                         # Script documentation & usage guide
+│   ├── <service>/                        # Dedicated microservice scripts (build, test, run, stop, health)
+│   ├── web/                              # Web frontend scripts (dev, build, test, lint, typecheck, stop)
+│   ├── docker/                           # Container lifecycle scripts (build, run, health, logs, stop, clean)
+│   ├── kubernetes/                       # Kubernetes kind cluster & deployment scripts
+│   ├── gateway/                          # Apache APISIX & Gateway API lifecycle scripts
+│   └── all/                              # Platform aggregate scripts (build, test, start, stop, status)
 │
-├── .env                         # Confidential local/cloud environment credentials
-├── pnpm-workspace.yaml          # Monorepo package glob definition
-├── turbo.json                   # Turborepo task pipeline DAG & caching config
-└── package.json                 # Monorepo root scripts & orchestration
+├── infra/                                # [EXISTING] Infrastructure & Deployment Configurations
+│   ├── apisix/                           # [EXISTING] Apache APISIX Helm values & Gateway architecture
+│   ├── containers/                       # Docker Compose and container reference documentation
+│   │   ├── README.md                     # Container architecture guide & specifications
+│   │   └── docker-compose.yml            # Local 9-service integration compose manifest
+│   └── kubernetes/                       # [EXISTING] Kubernetes kind & Kustomize manifests
+│       ├── base/                         # Base deployments and ClusterIP services
+│       └── overlays/local/               # Local dev overlay & Gateway API manifests
+│
+├── docs/
+│   ├── architecture/                     # [EXISTING] Evergreen architecture specs (01–06)
+│   ├── agents/                           # [EXISTING] Multi-agent system documentation
+│   └── archive/                          # [EXISTING] Preserved historical documentation and legacy snapshot
+│
+├── pnpm-workspace.yaml                   # [EXISTING] Monorepo package workspace definitions
+├── turbo.json                            # [EXISTING] Turborepo task pipeline configuration
+└── package.json                          # [EXISTING] Root scripts & workspace orchestration
 ```
 
 ---
 
-## 2. Strict Architectural Boundaries
+## 3. Microservice Architecture & Port Allocation
 
-1. **No Direct DB Access in Clients**:
-   - `apps/web` and `apps/mobile` **MUST NEVER** import `@tire-store/db` or run raw SQL queries.
-   - All data fetching must go through `@tire-store/api-client` or the Supabase JS SDK.
-2. **End-to-End Type Safety**:
-   - All forms, search filters, and checkout payloads validate against Zod schemas in `@tire-store/types`.
-3. **Shared Business Logic**:
-   - Vehicle fitment math and dynamic bay duration algorithms (`calculateBayDuration`) reside exclusively in `@tire-store/types`, guaranteeing 100% logic parity across Web, Mobile, and Backend.
+Each backend service is an independent Gradle project with its own filesystem boundaries, JVM runtime, application configuration, and dedicated Flyway database migrations.
+
+| Service Name | Port | Build Status | Service Domain & Primary Responsibilities |
+| :--- | :---: | :---: | :--- |
+| **`automotive-operations`** | `8091` | `[EXISTING]` | **Orders & Billing**: Automotive orders, work orders, invoicing, and checkout Saga orchestration. |
+| **`automotive-product`** | `8092` | `[EXISTING]` | **Parts & Fitment**: Tires/parts catalog, fitment specifications, branch stock, reservations, and adjustments. |
+| **`vehicle-sales`** | `8093` | `[EXISTING]` | **Used Car Sales**: Vehicle sales workflows, customer deposits, transactions, and status coordination. |
+| **`vehicle-product`** | `8094` | `[EXISTING]` | **Vehicle Inventory**: VIN-specific vehicles, listings, conditions, vehicle locations, and availability holds. |
+| **`notification`** | `8095` | `[EXISTING]` | **Messaging**: Notification templates, delivery dispatch (SMS/Email/Push), preferences, and retry tracking. |
+| **`identity-access`** | `8096` | `[EXISTING]` | **Users & RBAC**: Application user profiles, store-scoped access assignments; Keycloak OIDC integration. |
+| **`appointment`** | `8097` | `[EXISTING]` | **Booking Lifecycle**: Customer appointment scheduling, rescheduling, cancellations, and booking records. |
+| **`store-management`** | `8098` | `[EXISTING]` | **Physical Resources**: Stores, operating hours, service capabilities, equipment capacities, and exclusive bay reservations. |
+| *`apps/web`* | `3000` | `[EXISTING]` | Next.js 14+ customer storefront, tire fitment search, and store admin portal. |
+| *`apps/mobile`* | `8081` | `[EXISTING]` | Expo Metro bundler for iOS and Android mobile app. |
 
 ---
 
-## 3. Master Command Reference
+## 4. Architectural Boundaries & Data Isolation
 
-### A. Frontend Web App (`apps/web`)
+1. **Build & Runtime Independence `[EXISTING]`**:
+   - Each Spring Boot service builds strictly from its own directory (`backend/services/<service>/`).
+   - No shared Gradle root project or local cross-project dependencies (`project(":")`) exist.
+   - Each service passes the **Copied-Directory Acceptance Test** (builds cleanly when copied to an isolated directory).
+2. **Service Ownership & Database Isolation `[PLANNED]`**:
+   - Each microservice owns its dedicated PostgreSQL database schema and Flyway migrations (`db/migration/V*.sql`).
+   - Direct cross-database SQL queries, foreign keys, or shared JPA entities are strictly forbidden. Cross-service communication occurs via REST (OpenAPI) or RabbitMQ domain events.
+   - `appointment` owns appointment records and lifecycle; `store-management` owns physical bays and bay reservations; `automotive-operations` owns checkout orchestration; `automotive-product` owns tire stock and reservations.
+3. **No Direct Database Access in Clients `[EXISTING]`**:
+   - Client applications (`apps/web`, `apps/mobile`) **MUST NEVER** access databases directly.
+   - All backend data access passes through REST APIs / Apache APISIX reverse proxy via `@tire-store/api-client`.
+4. **End-to-End Type Safety `[EXISTING]`**:
+   - Client models and API contracts reside in `@tire-store/api-client`. Backend endpoints expose OpenAPI contracts.
+
+---
+
+## 5. Master Command Reference
+
+> **Important**: `pnpm` and `Turborepo` commands manage TypeScript packages and client applications only. They do **NOT** build, test, or run Spring Boot microservices. Each Spring Boot microservice uses its own Gradle Wrapper (`./gradlew`).
+
+### A. Frontend Web Application (`apps/web`) `[EXISTING]`
 
 | Action | Command | URL / Notes |
 | :--- | :--- | :--- |
 | **Start Web Dev Server** | `pnpm dev:web` | Starts Next.js 14 App Router on `http://localhost:3000` |
-| **Build Web App** | `pnpm --filter @tire-store/web build` | Production ISR & static build |
+| **Build Web App** | `pnpm --filter @tire-store/web build` | Production ISR & static bundle build |
 | **Start Web Production** | `pnpm --filter @tire-store/web start` | Serves production build |
 | **Typecheck Web** | `pnpm --filter @tire-store/web typecheck` | TypeScript verification |
 
 ---
 
-### B. Mobile App (`apps/mobile`)
+### B. Mobile Application (`apps/mobile`) `[EXISTING]`
 
 | Action | Command | Notes |
 | :--- | :--- | :--- |
-| **Start Expo Dev Server** | `pnpm dev:mobile` | Starts Expo dev server with QR code for Expo Go |
+| **Start Expo Dev Server** | `pnpm dev:mobile` | Starts Expo Metro server on port `8081` |
 | **Launch on iOS Simulator** | `pnpm --filter @tire-store/mobile run ios` | Boots iOS Simulator |
-| **Launch on Android Emulator**| `pnpm --filter @tire-store/mobile run android` | Boots Android Emulator |
-| **Launch Mobile Web Preview**| `pnpm --filter @tire-store/mobile run web` | Opens mobile web interface on `http://localhost:8081` |
-| **Typecheck Mobile** | `pnpm --filter @tire-store/mobile typecheck`| TypeScript verification |
+| **Launch on Android Emulator**| `pnpm --filter @tire-store/mobile run android`| Boots Android Emulator |
+| **Launch Mobile Web Preview** | `pnpm --filter @tire-store/mobile run web` | Opens mobile browser preview |
+| **Typecheck Mobile** | `pnpm --filter @tire-store/mobile typecheck` | TypeScript verification |
 
 ---
 
-### C. Backend API Server (`apps/api`)
+### C. Spring Boot Microservices (`backend/services/*`) `[EXISTING]`
 
-| Action | Command | URL / Notes |
+*Note: Each command runs within the specific service directory.*
+
+| Action | Command | Target / Notes |
 | :--- | :--- | :--- |
-| **Start Backend API Dev Server** | `pnpm dev:api` | Starts Node.js REST API on `http://localhost:4000` |
-| **Build Backend API** | `pnpm --filter @tire-store/api build` | Compiles TypeScript to `dist/` |
-| **Start Backend Production** | `pnpm --filter @tire-store/api start` | Serves compiled API server |
-| **Typecheck Backend API** | `pnpm --filter @tire-store/api typecheck` | TypeScript verification |
+| **Build Single Service** | `./gradlew build` | Run inside `backend/services/<service>/` |
+| **Run Unit Tests** | `./gradlew test` | Executes JUnit 5 & MockMvc tests |
+| **Start Single Service** | `./gradlew bootRun` | Starts service on its assigned port (`8091`–`8098`) |
+| **Check Health Endpoint** | `curl http://localhost:<PORT>/actuator/health` | Verifies Actuator health |
 
 ---
 
-### D. Database & Migrations (`packages/db`)
+### D. Service-Oriented Shell Scripts (`scripts/`) `[EXISTING]`
+
+| Script / Directory | Purpose | Example Usage |
+| :--- | :--- | :--- |
+| **`./scripts/all/start.sh`** | Launches all 8 microservices and Next.js frontend in background & verifies health | `./scripts/all/start.sh` |
+| **`./scripts/all/stop.sh`** | Gracefully stops all platform background processes | `./scripts/all/stop.sh` |
+| **`./scripts/all/status.sh`** | Inspects health & process status across all 8 microservices and web frontend | `./scripts/all/status.sh` |
+| **`./scripts/all/build.sh`** | Compiles, tests, and packages all 8 microservices and web frontend | `./scripts/all/build.sh` |
+| **`./scripts/all/test.sh`** | Executes test suites across all 8 microservices and web frontend | `./scripts/all/test.sh` |
+| **`./scripts/<service>/run.sh`** | Starts an individual service (foreground by default, `--background` supported) | `./scripts/automotive-product/run.sh --background` |
+| **`./scripts/<service>/health.sh`** | Checks Spring Boot Actuator `/actuator/health` endpoint | `./scripts/automotive-product/health.sh` |
+| **`./scripts/<service>/stop.sh`** | Stops an individual service gracefully via verified PID | `./scripts/automotive-product/stop.sh` |
+| **`./scripts/web/dev.sh`** | Starts Next.js web application (foreground or `--background`) | `./scripts/web/dev.sh` |
+| **`./scripts/web/stop.sh`** | Stops background Next.js web application | `./scripts/web/stop.sh` |
+
+---
+
+### E. Kubernetes Local Development (`scripts/kubernetes/` & `infra/kubernetes/`) `[EXISTING]`
+
+| Script / Action | Purpose | Command |
+| :--- | :--- | :--- |
+| **Create Local Cluster** | Provisions single-node kind cluster `tire-store-local` | `./scripts/kubernetes/cluster-create.sh` |
+| **Load Local Images** | Tags and loads all 9 dev images into kind node | `./scripts/kubernetes/images-load.sh dev-local` |
+| **Deploy Workloads** | Deploys Kustomize local overlay to `tire-store` namespace | `./scripts/kubernetes/deploy.sh` |
+| **Await Rollouts** | Waits for all 9 deployments to reach Ready status | `./scripts/kubernetes/rollout.sh` |
+| **Cluster & App Status** | Inspects kind node, deployments, pods, and ClusterIP services | `./scripts/kubernetes/status.sh` |
+| **Health Probes** | Executes in-cluster curl probe across all 9 workloads | `./scripts/kubernetes/health.sh` |
+| **Follow Pod Logs** | Streams logs for any service or web container | `./scripts/kubernetes/logs.sh <service> -f` |
+| **Port Forwarding** | Exposes service ports (`8091`-`8098`, `3000`) on localhost | `./scripts/kubernetes/port-forward.sh all` |
+| **Tear Down Apps** | Removes all deployments and services from cluster | `./scripts/kubernetes/remove-apps.sh` |
+| **Delete Cluster** | Destroys the kind cluster `tire-store-local` | `./scripts/kubernetes/cluster-delete.sh` |
+
+---
+
+### F. Apache APISIX & Gateway API Local Development (`scripts/gateway/` & `infra/apisix/`) `[EXISTING]`
+
+| Script / Action | Purpose | Command |
+| :--- | :--- | :--- |
+| **Install APISIX & CRDs** | Installs Gateway API v1.2.1 CRDs and APISIX Helm chart in `ingress-apisix` | `./scripts/gateway/install.sh` |
+| **Deploy Routes** | Applies GatewayClass, Gateway, and HTTPRoutes via Kustomize | `./scripts/gateway/deploy-routes.sh` |
+| **Gateway Status** | Inspects gateway pods, services, GatewayClass, Gateway, and HTTPRoute status | `./scripts/gateway/status.sh` |
+| **Integration & Security Test** | Runs in-cluster routing test suite and negative security checks | `./scripts/gateway/test.sh` |
+| **Gateway Pod Logs** | Streams logs for data-plane `apisix` or controller | `./scripts/gateway/logs.sh apisix -f` |
+| **Gateway Port Forward** | Forwards gateway port 80 to `http://127.0.0.1:9080` for host testing | `./scripts/gateway/port-forward.sh` |
+| **Uninstall Gateway** | Deletes gateway routes, Helm release, and Gateway API CRDs | `./scripts/gateway/uninstall.sh` |
+
+---
+
+### G. Monorepo Orchestration (`Turborepo` + `pnpm`) `[EXISTING]`
+
+*Note: Applies strictly to TypeScript packages and client applications (`apps/*`, `packages/*`).*
 
 | Action | Command | Notes |
 | :--- | :--- | :--- |
-| **Deploy All Migrations** | `pnpm db:deploy` | Applies PostGIS, 11 core tables, triggers, RPCs & enforces 100% RLS |
-| **Seed Database** | `pnpm db:seed` | Seeds Top 6 makes, tire catalog, retail stores & service bays |
-| **Verify Supabase Live** | `pnpm db:verify` | Connects to cloud Supabase and reports live status of tables & RPCs |
-| **Open Drizzle Studio** | `pnpm db:studio` | Launches visual DB browser GUI at `https://local.drizzle.team` |
+| **Run Dev Servers** | `pnpm dev` | Turborepo parallel dev server runner (`apps/web`) |
+| **Build Web/Packages** | `pnpm build` | Turbo builds shared packages and web apps |
+| **Run Frontend Unit Tests**| `pnpm test` | Runs Vitest suites across packages |
+| **Typecheck All Packages** | `pnpm typecheck` | Validates TypeScript across all workspace packages |
+| **Lint All Packages** | `pnpm lint` | Enforces ESLint and monorepo boundary rules |
+| **Clean All Caches** | `pnpm clean` | Cleans `.turbo`, `.next`, and build caches |
 
 ---
 
-### E. Shell Automation Scripts (`scripts/`)
+## 6. Developer Onboarding: Independent Spring Boot Workflow `[EXISTING]`
 
-| Script | Purpose | Example Usage |
-| :--- | :--- | :--- |
-| **`./scripts/start-all.sh`** | Launches both Backend API and Frontend Web | `./scripts/start-all.sh` |
-| **`./scripts/stop-all.sh`** | Stops all active frontend & backend processes | `./scripts/stop-all.sh` |
-| **`./scripts/status.sh`** | Checks live ports & process status | `./scripts/status.sh` |
-| **`./scripts/start-backend.sh`**| Starts Backend API (port 4000) in background | `./scripts/start-backend.sh` (or `-f` for foreground) |
-| **`./scripts/stop-backend.sh`** | Stops Backend API and frees port 4000 | `./scripts/stop-backend.sh` |
-| **`./scripts/start-frontend.sh`**| Starts Frontend Web (port 3000) in background | `./scripts/start-frontend.sh` (or `-f` for foreground) |
-| **`./scripts/stop-frontend.sh`**| Stops Frontend Web and frees port 3000 | `./scripts/stop-frontend.sh` |
-| **`./scripts/db.sh`** | Database helper (deploy, seed, verify, studio) | `./scripts/db.sh deploy` or `./scripts/db.sh verify` |
+To ensure complete build and runtime independence, backend engineers work within individual service directories without requiring the monorepo root or sibling services.
+
+### Step-by-Step: Working on a Single Service (e.g. `automotive-product`)
+
+```bash
+# 1. Start from repository root
+cd /home/phu/dev/tire-store-app
+
+# 2. Navigate directly to the service directory
+cd backend/services/automotive-product
+
+# 3. Build the application independently
+./gradlew build
+
+# 4. Execute the service test suite
+./gradlew test
+
+# 5. Run the service locally (Port 8092)
+./gradlew bootRun
+
+# 6. Verify service health in a separate terminal
+curl -s http://localhost:8092/actuator/health
+# Expected output: {"status":"UP"}
+```
 
 ---
 
-### F. Full Monorepo Orchestration (Turborepo)
+## 7. Layered Git Ignore Architecture `[EXISTING]`
 
-| Action | Command | Notes |
-| :--- | :--- | :--- |
-| **Run All Dev Servers** | `pnpm dev` | Turborepo parallel dev server runner |
-| **Build Entire Monorepo** | `pnpm build` | Turbo builds all packages according to DAG dependencies |
-| **Run All Unit Tests** | `pnpm test` | Runs tests across all packages |
-| **Typecheck Everything** | `pnpm typecheck` | Validates TypeScript across all 10 packages |
-| **Lint Everything** | `pnpm lint` | Enforces ESLint and monorepo boundary rules |
-| **Clean All Caches** | `pnpm clean` | Cleans `.turbo`, `.next`, and build artifacts |
+The repository uses a multi-layered, decentralized `.gitignore` structure where ignore rules are co-located with the specific applications and infrastructure they govern.
 
+### A. Responsibility Breakdown
+
+| File Location | Scope & Primary Responsibilities |
+| :--- | :--- |
+| **`/.gitignore`** | **Monorepo Root**: Global OS artifacts (`.DS_Store`, `Thumbs.db`), common editor files (`.vscode/`, `.idea/`), monorepo tooling (`node_modules/`, `.pnpm-store/`, `.turbo/`), shared build outputs (`dist/`, `build/`, `out/`), shared logs (`.logs/`, `*.log`, `*.pid`), coverage reports, and base `.env` rules. |
+| **`apps/web/.gitignore`** | **Next.js Web Frontend**: `.next/` cache and build artifacts, static exports (`out/`), auto-generated TypeScript headers (`next-env.d.ts`), `.cache/`, `.swc/`, `.eslintcache`, Playwright test reports, and Next.js `.env*.local` overrides. |
+| **`apps/mobile/.gitignore`** | **Expo Mobile App**: `.expo/` runtime caches, `web-build/`, `metro-cache/`, and mobile signing keys/keystores (`*.jks`, `*.p8`, `*.p12`, `*.keystore`, `*.mobileprovision`). |
+| **`backend/services/<service>/.gitignore`** | **Spring Boot Microservices (x8)**: Local Gradle cache (`.gradle/`), build outputs (`build/`), compiled classes (`*.class`), JVM crash logs (`hs_err_pid*`, `replay_pid*`), and package archives (`*.jar`, `*.war`), while explicitly preserving wrapper JARs. |
+| **`infra/.gitignore`** | **Infrastructure & Gateway**: Local kubeconfig files (`*kubeconfig*`), Helm render outputs (`*.tgz`, `.helm/`), diagnostic state dumps (`*-dump.json`, `diagnostic-*.yaml`), local SSL/TLS test certificates, and secret override manifests (`*-secret.yaml`). |
+| **`scripts/.gitignore`** | **Automation Tooling**: Local PID metadata (`*.pid`), temporary execution logs (`*.log`), and `.logs/`, while explicitly preserving all shell scripts (`!*.sh`) and documentation. |
+
+### B. `.gitignore` vs `.dockerignore`
+
+- **`.gitignore`**: Defines what files Git excludes from version control. Prevents checking in build outputs, sensitive keys, and machine-specific cache files.
+- **`.dockerignore`**: Defines what files the Docker CLI excludes from the Docker build context when sending files to the Docker daemon. Optimizes build speed and avoids invalidating Docker layer caches.
+- *Key Distinction*: `Dockerfile` and `.dockerignore` must **always remain tracked in Git**. In `apps/web` and `backend/services/*`, `.dockerignore` is tracked alongside the service's `.gitignore`.
+
+### C. Gradle Wrapper Preservation Standard
+
+Spring Boot microservices require zero-install portability. The Gradle Wrapper allows developers and CI/CD pipelines to build services without pre-installing Gradle. Therefore:
+- `gradlew` and `gradlew.bat` are tracked.
+- `gradle/wrapper/gradle-wrapper.properties` is tracked.
+- `gradle/wrapper/gradle-wrapper.jar` is **explicitly un-ignored** using `!gradle/wrapper/gradle-wrapper.jar` across all 8 microservices, overriding the generic `*.jar` package rule.
+
+### D. Diagnosing Ignored & Tracked Files
+
+To inspect why a file is ignored or which rule applies:
+
+```bash
+# Check which .gitignore rule matches a specific path
+git check-ignore -v <path/to/file>
+
+# Check status of ignored files
+git status --ignored -s
+
+# List all tracked files matching current ignore patterns
+git ls-files -c -i --exclude-standard
+```
+
+### E. Secret-Bearing Files & Sanitized Templates
+
+- **Never Track Real Secrets**: `.env`, `.env.local`, `*.key`, `*.keystore`, and `*-secret.yaml` are strictly ignored.
+- **Track Sanitized Samples**: Explicit negation rules (`!.env.example`, `!.env.sample`, `!values-local.yaml`) ensure sanitized configuration templates are tracked for new developer onboarding.
+
+### F. Generated OpenAPI Clients
+
+In future development phases, OpenAPI client code generated in `@tire-store/api-client` (e.g. models, queries, fetchers) will be **intentionally tracked in Git** to guarantee strict end-to-end compile-time type safety across Web and Mobile applications without requiring an active backend during local frontend builds.

@@ -1,0 +1,4 @@
+{
+  "extends": ["@tire-store/eslint-config/apps"]
+}
+
