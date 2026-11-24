@@ -1,0 +1,184 @@
+# Logical System Strategies, Concurrency Algorithms, and Architectural Evaluations
+
+> **Status**: AUTHORITATIVE LOGICAL SYSTEM DESIGN (Phase 2F-B-R2)
+> **Scope**: Cross-Service Algorithms, Concurrency Controls, Data Flow Semantics, and Architectural Trade-Off Evaluations for Medium-Scale Operations (15–50 Stores).
+
+---
+
+## 1. Executive Summary & Evaluation Framework
+
+Every distributed retail and service platform must balance consistency, latency, write amplification, and failure recovery. For Tire-Store-App, we evaluate design strategies across 10 critical operational dimensions using an explicit 12-criteria rubric:
+1. **Correctness**: Mathematical and transactional guarantee against state corruption.
+2. **Concurrency Safety**: Isolation level under simultaneous, competing read/write requests.
+3. **Latency**: p95 and p99 response times.
+4. **Read Amplification**: Multiplier between client request and storage read ops.
+5. **Write Amplification**: Multiplier between client mutation and underlying disk/WAL writes.
+6. **Synchronous Dependencies**: Number of blocking inter-service RPCs on the critical path.
+7. **Failure Recovery**: Complexity and determinism of rollbacks/compensations.
+8. **Operational Complexity**: Operational overhead, tooling requirements, and cognitive load.
+9. **Scalability**: Ability to scale linearly with store count (15 to 50 stores).
+10. **Ease of Testing**: Feasibility of deterministic unit, integration, and contract tests.
+11. **Future Extensibility**: Adaptability to additional lines of business without re-architecture.
+12. **Medium-Scale Fit**: Appropriateness for a regional automotive retail and service chain.
+
+---
+
+## 2. Inventory Management Strategies
+
+### 2.1 The Problem
+Prevent physical inventory overselling and phantom stock holds while supporting high-concurrency catalog browsing, multi-item checkouts, inter-branch transfers, damaged stock adjustments, and physical handover. Reserving stock for an ongoing checkout must never prematurely deduct physical on-hand stock.
+
+### 2.2 Competing Alternatives
+1. **Alternative A: Redis Atomic Counter (`DECRBY` / EVAL Lua script)**: Very fast memory-based hold, but volatile. If Redis fails or restarts, reservations can be lost or drift from the database truth. Requires dual-write synchronization with PostgreSQL.
+2. **Alternative B: PostgreSQL Optimistic Locking (`version` column)**: High retry rate under contention for popular tire SKUs during promotions; aborted transactions waste client latency.
+3. **Alternative C: PostgreSQL Pessimistic Locking (`SELECT FOR UPDATE`)**: Strong isolation, but locks the entire inventory row during processing, increasing queueing delays and risking deadlocks when checkouts reserve multiple SKUs in arbitrary order.
+4. **Alternative D (SELECTED): PostgreSQL Conditional Atomic UPDATE with Dual State Ledger**: Executes an atomic state transition in PostgreSQL:
+   ```sql
+   UPDATE store_inventory
+   SET quantity_reserved = quantity_reserved + :req_qty
+   WHERE store_id = :store_id
+     AND sku_id = :sku_id
+     AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty
+   RETURNING id, quantity_on_hand, quantity_reserved, quantity_allocated;
+   ```
+   Paired with an atomic insert into `stock_reservation` in the same local transaction.
+
+### 2.3 Evaluation Matrix
+| Strategy | Concurrency Safety | p95 Latency | Deadlock Risk | Crash Recovery | Verdict |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| Redis In-Memory Counter | Weak (Drift) | < 5 ms | Zero | Complex Re-sync | Rejected (Durability Risk) |
+| Optimistic Locking | Moderate (Aborts) | 40–120 ms | Low | Simple Rollback | Rejected (High Contention Aborts) |
+| Pessimistic Row Lock | High | 50–200 ms | High (Multi-SKU) | Clean Rollback | Rejected for Holds |
+| **Conditional Atomic Update** | **Absolute** | **15–35 ms** | **Zero** | **PostgreSQL WAL + Outbox** | **SELECTED** |
+
+### 2.4 Concrete Inventory Ledger Semantics
+- **Stock Invariant**:
+  $$\text{Available-to-Promise (ATP)} = \text{quantity\_on\_hand} - (\text{quantity\_reserved} + \text{quantity\_allocated}) \ge 0$$
+- **Tentative Hold (Checkout Initiation)**:
+  Increments `quantity_reserved` by $N$. `quantity_on_hand` and `quantity_allocated` are untouched. Creates `stock_reservation` with `status = 'HELD'` and 15-minute TTL.
+- **Allocation Confirmation (Payment Success)**:
+  Atomically decrements `quantity_reserved` by $N$ and increments `quantity_allocated` by $N$. **`quantity_on_hand` remains untouched!**
+- **Physical Fulfillment Handover (Customer Pickup or Bay Installation)**:
+  Atomically decrements `quantity_allocated` by $N$ and `quantity_on_hand` by $N$. Writes permanent audit entry in `stock_movement` with type `FULFILLMENT_PICKUP` or `WORKSHOP_CONSUMPTION`.
+- **Compensation / Expiration (Checkout Failure or Timeout)**:
+  Atomically decrements `quantity_reserved` by $N$.
+
+---
+
+## 3. Shopping Cart Architecture in Redis
+
+### 3.1 The Problem
+Support high-throughput guest and authenticated cart interactions across Web and Mobile with minimal database load, guest-to-customer merging, item-level mutations, configurable automotive services, and multi-store awareness without prematurely reserving inventory.
+
+### 3.2 Competing Alternatives
+1. **Alternative A: PostgreSQL-Backed Cart**: Durable, relational, but high write amplification on frequent quantity increments/removals; pollutes relational database with abandoned sessions.
+2. **Alternative B: Redis Hash (`HSET cart:{id} {item_id} {item_json}`)**: Fast field-level operations, but lacks atomic validation of global cart-level invariants (such as total item count limits or multi-store grouping).
+3. **Alternative C (SELECTED): Redis String with JSON Serialization + Optimistic Cart Versioning**:
+   - The entire cart is stored under key `cart:{cart_id}` as a serialized JSON document with metadata (`version`, `store_id`, `updated_at`, `items[]`).
+   - Mutations use Redis Lua script or CAS (Check-And-Set via `WATCH` / optimistic version match) to verify `client_version == stored_version`.
+   - Cart TTL is refreshed on mutation (default: 7 days for authenticated users, 48 hours for guests).
+   - Redis persistence configuration: **Proposed AOF `appendfsync everysec`**, accepting a prospective 1-second loss window during host power failure in exchange for zero write stalls.
+
+### 3.3 Multi-Store Cart Partitioning Algorithm
+1. Cart items track their candidate `store_id`.
+2. When the customer enters checkout, the Cart service checks:
+   $$\text{count}\Big(\text{distinct}\big(\text{items.map}(i \to i.store\_id)\big)\Big) \le 1$$
+3. If $> 1$, the checkout API **rejects single atomic order creation** with error `MULTI_STORE_CART_PARTITION_REQUIRED`.
+4. The client UI renders separate store checkout tabs. The customer explicitly authorizes each store order independently.
+5. Each store order triggers its own isolated Checkout Saga. No silent multi-order charging.
+
+---
+
+## 4. Cart Invalidation & Stock Change Detection
+
+### 4.1 The Problem
+When catalog prices change or stock depletes while a customer has items in an active cart, the system must prevent checkouts against stale pricing/availability without overloading the database with polling.
+
+### 4.2 Competing Alternatives & Recommended Strategy
+1. **Rejected: Eager Cart Reverse-Indexing**: Writing to thousands of Redis cart keys whenever a catalog price changes creates huge write amplification and locks Redis during mass SKU updates.
+2. **Rejected: Blind Periodic Polling**: 10,000 active browser tabs polling `/validate` every 5 seconds would produce 2,000 RPS on inventory and catalog databases.
+3. **SELECTED: Multi-Tiered Batched Revalidation + TanStack Query Invalidation**:
+   - **Tier 1 (Browse / Focus)**: On window focus or route transition to `/cart`, the web/mobile client issues a lightweight `POST /api/v1/automotive/operations/cart/{id}/validate` with current item IDs, quantities, and cached prices.
+   - **Tier 2 (Pre-Checkout Gate)**: The Checkout Saga performs mandatory, blocking stock hold and price re-verification. If a mismatch is detected, the checkout aborts with `PRICE_CHANGED` or `INSUFFICIENT_STOCK`, returning the updated item status.
+
+---
+
+## 5. Unified Catalog & Automotive Service Modeling
+
+### 5.1 The Problem
+Physical products (tires, wheels, parts) and automotive services (mounting, balancing, alignment, oil changes) must coexist in customer carts, quotes, and work orders while preserving their fundamentally different operational semantics (physical stock vs. technician labor and bay capacity).
+
+### 5.2 The Strategy
+- **Shared Sellable Item Identity**: Both physical goods and service offerings inherit a unified base abstraction (`sellable_item_id`, `item_type`, `base_price`, `tax_category`).
+- **Domain Specialization**:
+  - `PRODUCT`: Refers to a physical SKU, links to `tire_specification`, requires branch inventory tracking, fits vehicles via YMMT rules.
+  - `SERVICE`: Refers to labor/procedure, links to `service_definition` (duration in minutes, required equipment bay types, skill level), requires appointment slot or `SCHEDULE_LATER` entitlement, does **not** consume physical stock (unless bundled with required parts).
+- **Service Pricing Models**:
+  - `FIXED`: Flat fee (e.g., standard oil change: \$49.99).
+  - `CALCULATED_TIER`: Calculated dynamically (e.g., tire mount/balance: \$20/tire for $\le 17"$, \$30/tire for $\ge 18"$).
+  - `ESTIMATED_STARTING_AT`: Baseline diagnostic fee; final bill subject to technician inspection.
+  - `QUOTE_REQUIRED`: Specialized repairs; cannot be paid online without work-order quote approval.
+
+---
+
+## 6. Distributed Checkout Saga Coordination
+
+### 6.1 The Problem
+Mixed checkouts (tires + installation bay booking) require coordinating stock reservation, bay reservation, payment authorization, and customer order records across multiple microservices without distributed two-phase commit (2PC).
+
+### 6.2 Choreography vs. Orchestration
+- **Choreography Rejected**: Event-driven peer-to-peer chains become tangled (split-brain state, impossible debugging, circular event dependencies between operations, product, store, and appointment).
+- **SELECTED: Stateful Saga Orchestrator in `automotive-operations`**:
+  - The Saga orchestrator persists each step transition into a durable PostgreSQL table `checkout_saga_instance` before executing external calls.
+  - Inter-service communication uses idempotent REST calls with unique correlation IDs.
+  - Compensations execute in reverse order upon downstream failure.
+
+---
+
+## 7. Appointment & Service Capacity Scheduling Models
+
+### 7.1 The Problem
+Prevent physical double-booking of service bays and technicians across operating hours while supporting multi-service jobs of variable duration, walk-in emergency intake, customer rescheduling, and store closure overrides.
+
+### 7.2 Competing Capacity & Scheduling Strategies
+1. **Alternative A: Coarse Capacity Pools (Counter-Based)**: Stores maintain an integer capacity per hourly time bucket (e.g., "Max 4 appointments from 10:00 to 11:00 AM").
+   *Trade-off*: Simple to query, but ignores physical bay equipment constraints (e.g., 3 standard bays and 1 alignment rack) and variable procedure durations (e.g., 90-minute brake jobs vs 30-minute tire rotations), leading to shop floor gridlock.
+2. **Alternative B: Late Physical Bay Assignment**: Customers book a floating appointment slot; store managers manually assign vehicles to bays when they arrive on site.
+   *Trade-off*: Flexible for shop managers, but risks severe overbooking if 5 customers requiring alignment racks arrive simultaneously.
+3. **Alternative C (SELECTED PROPOSAL): System-Selected Exact-Bay Reservation with PostgreSQL GiST Range Exclusion**:
+   - The customer selects a time slot and service; the system **automatically selects a compatible physical bay** behind the scenes.
+   - The bay reservation is protected by a PostgreSQL GiST Range Exclusion constraint (`EXCLUDE USING GIST (bay_id WITH =, booked_period WITH &&)`):
+     ```sql
+     CREATE TABLE bay_schedule_entry (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         bay_id UUID NOT NULL REFERENCES service_bay(id),
+         booked_period TSRANGE NOT NULL,
+         status VARCHAR(30) NOT NULL,
+         EXCLUDE USING GIST (bay_id WITH =, booked_period WITH &&)
+         WHERE (status NOT IN ('CANCELLED', 'RELEASED'))
+     );
+     ```
+   - **Correctness Guarantee**: The database engine physically rejects any overlapping booking on the same bay with SQL state `23P01`. Customers do not need to choose bay numbers; the algorithm assigns the first compatible, available bay automatically.
+
+---
+
+## 8. Work Order & Workshop Execution Design
+
+### 8.1 The Work Ticket Abstraction
+- A `work_order` represents a single physical vehicle shop visit.
+- Multiple tasks (`work_order_task`) represent individual operations.
+- **Walk-In Support**: Shop workers can create an unlinked work order directly (`ACT-OPS-020`) without a pre-existing e-commerce order.
+- **Supplemental Quotes**: If an inspection reveals additional necessary repairs:
+  1. Worker drafts supplemental quote (`ACT-OPS-021`).
+  2. Quote revision incremented (`status = 'PENDING_CUSTOMER_APPROVAL'`).
+  3. SMS sent to customer with itemized breakdown.
+  4. Customer explicitly approves quote revision (`ACT-OPS-022`) via cryptographic token or authenticated session.
+  5. Tasks are unlocked for technicians only after approval.
+
+---
+
+## 9. Independent Vehicle Sales Architecture
+Used-vehicle sales are legally, operationally, and financially distinct from tire commerce:
+- Managed by `vehicle-sales` (Port 8093) orchestrating with `vehicle-product` (Port 8094).
+- Involves state-mandated digital purchase contracts, title transfer, odometer disclosures, holding deposits, and financing approvals.
+- Completely isolated from `automotive-operations` to ensure tire e-commerce regressions never compromise high-value vehicle sales deals.

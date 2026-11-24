@@ -104,3 +104,4 @@ test-results/
 # 7. Local Agent Harness & Workspace Metadata
 # ------------------------------------------------------------------------------
 .agents/
+docs/architecture/service-blueprints/*.patch

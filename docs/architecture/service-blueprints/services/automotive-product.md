@@ -1,126 +1,185 @@
-# Automotive Product Service (`automotive-product`) — Capability & Architecture Blueprint
+# Microservice Architecture Specification: `automotive-product`
 
-> **Service Status**: Skeletons & Health Endpoint `[EXISTING]`; Business Logic & Flyway Migrations `[PLANNED]`  
-> **Port**: `8092`  
-> **Key Architectural Authority**: Independent microservice database; authoritative owner of tire/parts catalog, vehicle fitment reference rules, and store physical stock ledger.
-
----
-
-## A. Service Overview
-
-### 1. Business Purpose & Scope
-The `automotive-product` microservice is the central product catalog, fitment validation, and branch-level physical inventory engine for tires, wheels, and automotive parts. It manages tire specifications, physical dimensional attributes, Year/Make/Model/Trim (YMMT) vehicle fitment compatibility rules, store-level inventory counts (on-hand, reserved, allocated), atomic reservation locking during customer checkout, retail pricing rules, and search filtering.
-
-### 2. Owned Domain Entities
-- **Tire Brand & Product Family**: Commercial manufacturer taxonomy and tire lines.
-- **Product SKU & Dimensions**: Physical tire attributes (width, aspect ratio, rim diameter, load index, speed rating, UTQG, sidewall).
-- **Vehicle Fitment Rule**: OEM factory sizing and optional plus-sizing rules mapped to vehicle Year/Make/Model/Trim.
-- **Store Inventory Balance**: Physical inventory ledger tracking `quantity_on_hand`, `quantity_reserved`, and `quantity_allocated` per store branch.
-- **Stock Reservation**: Time-bounded hold on physical stock during customer checkout (proposed default: 15-minute TTL [configurable policy]).
-- **Stock Movement Log**: Immutable append-only audit ledger of every physical inventory change (`RECEIPT`, `TRANSFER`, `RESERVATION_HOLD`, `RESERVATION_RELEASE`, `SALE_ALLOCATION`, `ADJUSTMENT`).
-- **Product Pricing & Promotion**: Base MSRP, promotional discount campaigns, and store-specific price overrides.
-
-### 3. Owned Business Capabilities
-- Comprehensive tire and automotive parts catalog management.
-- Authoritative vehicle fitment compatibility lookup.
-- Real-time Available-to-Promise (ATP) stock calculation:
-  $$\text{quantity\_available} = \text{quantity\_on\_hand} - (\text{quantity\_reserved} + \text{quantity\_allocated})$$
-- Atomic stock reservation and release during checkout.
-- Multi-branch inventory transfer and physical stock intake.
-- Pricing resolution with store overrides and promotional rules.
-
-### 4. Primary Consumers & Authorized Actors
-- **Consumers**:
-  - `apps/web` & `apps/mobile`: Public tire catalog search, dimension filtering, fitment selector.
-  - `automotive-operations`: Inquires stock availability, requests atomic reservations during checkout, confirms allocation upon payment.
-- **Authorized Actors**:
-  - `customer`: Public read access to catalog, fitment rules, and store stock availability.
-  - `shop_worker`: Scans inventory receipts, records physical inventory counts.
-  - `store_manager`: Adjusts branch stock counts, initiates inter-branch inventory transfers.
-  - `super_admin`: Creates new tire brands, adds SKUs, ingests vehicle fitment reference datasets.
-
-### 5. Service Dependencies
-- **Downstream Services Consumed**: None. `automotive-product` is a pure system of record.
-- **External Dependencies**: External fitment data feeds (NHTSA / OEM vehicle specs).
-
-### 6. Events Published & Consumed `[PLANNED via Outbox]`
-- **Events Published**:
-  - `product.catalog.sku_created` (v1)
-  - `product.inventory.low_stock` (v1)
-  - `product.inventory.transfer_dispatched` (v1)
-  - `product.inventory.transfer_received` (v1)
-
-### 7. Data Consistency & Invariants
-- **Non-Negative Available Stock Invariant**: Available stock cannot drop below zero.
-- **Atomic Concurrency Control**:
-  - Preferred implementation: **Conditional Atomic SQL Update**:
-    ```sql
-    UPDATE store_inventory 
-    SET quantity_reserved = quantity_reserved + :requestedQty, updated_at = NOW() 
-    WHERE store_id = :storeId AND sku_id = :skuId 
-      AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :requestedQty;
-    ```
-  - If `rowsUpdated == 1`, reservation succeeds; if `rowsUpdated == 0`, HTTP `409 Conflict` is returned immediately.
-  - Evaluated alternative: Pessimistic Row Locking (`SELECT ... FOR UPDATE`) is used when multi-row transaction consistency across bundled SKUs is required.
+> **Service Identity**: `automotive-product` (Port 8092)
+> **Status**: AUTHORITATIVE IMPLEMENTATION SPECIFICATION (Phase 2F-B-R2)
+> **Primary Authority**: Tire/Parts Catalog, Automotive Services, Base/Store Pricing Rules, Vehicle Fitment (YMMT) & Branch Inventory Accounting
+> **Storage**: PostgreSQL (catalog, specifications, branch inventory ledger, reservations, stock movements)
+> **Consolidated Modules**: 3 Substantive Modules
+> **Total Activities Owned**: 31 Activities (`ACT-PRD-001` through `ACT-PRD-031`)
+> **Total Unique HTTP Endpoints**: 28 Endpoints (27 HTTP routes + 1 background janitor operation)
 
 ---
 
-## B. Internal Module Decomposition
+## 1. Domain Boundary & Module Architecture
 
-### 1. Product Catalog Module
-- **Responsibility**: Manages brands, product lines, specifications, and SKU attributes.
-- **Owned Data**: `tire_brand`, `product_family`, `product_sku`, `tire_specification`.
+`automotive-product` is the authoritative source for all physical parts, global service definitions, vehicle fitment compatibility, and branch-level inventory balances.
 
-### 2. Vehicle Fitment Module
-- **Responsibility**: Manages generic Year/Make/Model/Trim taxonomy, OEM tire specifications, and plus-sizing rules.
-- **Owned Data**: `vehicle_reference_trim`, `fitment_specification`.
-
-### 3. Branch Inventory Module
-- **Responsibility**: Tracks physical inventory balances, stock movements, and receipts per store.
-- **Owned Data**: `store_inventory`, `stock_movement`, `inventory_receipt`.
-
-### 4. Stock Reservation Module
-- **Responsibility**: Manages temporary reservation holds during checkout, confirmation upon payment, and TTL cleanup.
-- **Owned Data**: `stock_reservation`.
-
-### 5. Pricing & Promotion Module
-- **Responsibility**: Resolves base MSRP, store price overrides, and promotional discount rules.
-- **Owned Data**: `product_price`, `store_price_override`, `promo_campaign`.
-
-### 6. Search & Filtering Module
-- **Responsibility**: High-speed multi-attribute filtering (width, ratio, rim, speed rating, season) using composite B-Tree indexes.
+```
+automotive-product (Port 8092)
+├── catalog/      # MODULE 1: Catalog & Services Module (12 activities: ACT-PRD-001, 002, 015, 016, 017, 020, 021, 022, 023, 027, 029, 030)
+├── fitment/      # MODULE 2: Vehicle Fitment Module (4 activities: ACT-PRD-003, 004, 024, 026)
+└── inventory/    # MODULE 3: Branch Inventory & Stock Allocation Module (15 activities: ACT-PRD-006..014, 018, 019, 025, 028, 031)
+```
 
 ---
 
-## C. Comprehensive Activity Catalog
+## 2. Business Entities & State Machine Transitions
 
-| Activity ID | Activity Name | Module | Initiator / Trigger | Transaction Boundary | Consistency | Concurrency Control | Authorization | Priority | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **ACT-PRD-001** | Create Product SKU | Catalog | `super_admin` | Local Service TX | Strong | Unique SKU Code | `super_admin` | MVP | Proposed |
-| **ACT-PRD-002** | Update Product SKU Attributes | Catalog | `super_admin` | Local Service TX | Strong | Optimistic `@Version` | `super_admin` | MVP | Proposed |
-| **ACT-PRD-003** | Ingest Vehicle Fitment Rules | Fitment | `super_admin` / Feed | Local Batch TX | Strong | Unique Composite Trim | `super_admin` | MVP | Proposed |
-| **ACT-PRD-004** | Lookup Vehicle Fitment | Fitment | Customer / Web / Mobile | Read-Only Local TX | Eventual | B-Tree Composite Index | Public | MVP | Proposed |
-| **ACT-PRD-005** | Filter Tires by Dimensions | Search | Customer / Web / Mobile | Read-Only Local TX | Eventual | Composite B-Tree Index | Public | MVP | Proposed |
-| **ACT-PRD-006** | Receive Supplier Stock at Store | Inventory | Store Cashier / Mgr | Local Service TX | Strong | Row Lock / Audit | `store_manager` | MVP | Proposed |
-| **ACT-PRD-007** | Check Available-to-Promise (ATP) | Inventory | Operations / Web | Read-Only Local TX | Strong | Read Committed | Public | MVP | Proposed |
-| **ACT-PRD-008** | Create Stock Reservation Hold | Reservation | `automotive-operations` | Local Service TX | Strong | Conditional SQL Update | System / Token | MVP | Proposed |
-| **ACT-PRD-009** | Confirm Stock Allocation | Reservation | `automotive-operations` | Local Service TX | Strong | Status Precondition | System / Token | MVP | Proposed |
-| **ACT-PRD-010** | Release / Compensate Stock Hold | Reservation | `automotive-operations` | Local Service TX | Strong | Idempotent Update | System / Token | MVP | Proposed |
-| **ACT-PRD-011** | Expire Abandoned Holds (Janitor) | Reservation | `@Scheduled` Janitor | Local Batch TX | Strong | `SKIP LOCKED` | System | MVP | Proposed |
-| **ACT-PRD-012** | Initiate Inter-Branch Transfer | Inventory | Store Manager | Local Service TX | Strong | Stock Balance Check | `store_manager` | Next | Proposed |
-| **ACT-PRD-013** | Receive Inter-Branch Transfer | Inventory | Target Store Manager | Local Service TX | Strong | Transfer Record Check | `store_manager` | Next | Proposed |
-| **ACT-PRD-014** | Execute Manual Stock Adjustment | Inventory | Store Manager | Local Service TX | Strong | Audit Ledger Append | `store_manager` | MVP | Proposed |
-| **ACT-PRD-015** | Configure Promotional Price Rule | Pricing | Marketing Manager | Local Service TX | Strong | Date Range Check | `super_admin` | MVP | Proposed |
-| **ACT-PRD-016** | Set Store-Level Price Override | Pricing | Store Manager | Local Service TX | Strong | Optimistic `@Version` | `store_manager` | Next | Proposed |
-| **ACT-PRD-017** | Resolve Effective Price for SKU | Pricing | Catalog Query / Order | Read-Only Local TX | Strong | Hierarchical Lookup | Public | MVP | Proposed |
-| **ACT-PRD-018** | List Inventory Balances for Store | Inventory | Store Staff Portal | Read-Only Local TX | Strong | B-Tree Index Scan | `shop_worker` | MVP | Proposed |
-| **ACT-PRD-019** | Audit Stock Movement History | Inventory | Compliance Auditor | Read-Only Local TX | Strong | Immutable Log | `store_manager` | Next | Proposed |
-| **ACT-PRD-020** | Deactivate Product SKU | Catalog | `super_admin` | Local Service TX | Strong | Active Orders Check | `super_admin` | Next | Proposed |
-| **ACT-PRD-021** | Bulk Import Product SKUs | Catalog | `super_admin` | Local Batch TX | Strong | Batch Validation | `super_admin` | Next | Proposed |
-| **ACT-PRD-022** | Create Tire Brand & Family | Catalog | `super_admin` | Local Service TX | Strong | Unique Brand Name | `super_admin` | MVP | Proposed |
-| **ACT-PRD-023** | Search Tires by Keyword / Model | Search | Public Web / Mobile | Read-Only Local TX | Eventual | `pg_trgm` GIN Index | Public | MVP | Proposed |
-| **ACT-PRD-024** | Verify Plus-Sizing Safety | Fitment | Tire Specialist | Read-Only Local TX | Strong | Rolling Diameter Rule | Public | Next | Proposed |
-| **ACT-PRD-025** | Flag Low Stock Thresholds | Inventory | System Monitoring | Read-Only Local TX | Strong | Threshold Predicate | System | Next | Proposed |
-| **ACT-PRD-026** | Ingest Staggered Fitment Rules | Fitment | `super_admin` | Local Batch TX | Strong | Front/Rear Pair Check | `super_admin` | Next | Proposed |
-| **ACT-PRD-027** | Retrieve Product Tech Sheet | Catalog | Public Web / Mobile | Read-Only Local TX | Strong | Primary Key Lookup | Public | MVP | Proposed |
-| **ACT-PRD-028** | Calculate Batch Inventory Valuation | Inventory | Financial Accountant | Read-Only Local TX | Strong | Aggregation Query | `super_admin` | Next | Proposed |
+### 2.1 Core Entities Owned
+1. `product_sku` (PostgreSQL): `id`, `sku_code`, `brand_id`, `product_family_id`, `base_price_cents`, `status`.
+2. `tire_specification` (PostgreSQL): `sku_id`, `section_width`, `aspect_ratio`, `rim_diameter`, `speed_rating`, `load_index`, `is_run_flat`, `utqg_treadwear`.
+3. `automotive_service_definition` (PostgreSQL): `id`, `service_code`, `service_name`, `estimated_duration_minutes`, `required_bay_type`, `pricing_model`.
+4. `store_price_override` (PostgreSQL): `id`, `store_id`, `sellable_item_id`, `override_price_cents`, `effective_range`.
+5. `vehicle_fitment_reference` (PostgreSQL): `id`, `year`, `make`, `model`, `trim`, `oem_tire_size`, `load_index_min`.
+6. `store_inventory` (PostgreSQL): `id`, `store_id`, `sku_id`, `quantity_on_hand`, `quantity_reserved`, `quantity_allocated`.
+7. `stock_reservation` (PostgreSQL): `id`, `store_id`, `sku_id`, `quantity`, `status`, `expires_at`, `order_id`.
+8. `stock_movement` (PostgreSQL): `id`, `store_id`, `sku_id`, `movement_type`, `quantity`, `reference_id`, `created_at`.
+
+### 2.2 Stock Reservation Lifecycle
+```text
+Stock Hold Lifecycle:
+  [HELD] --(Payment Succeeded)--> [CONFIRMED_ALLOCATED] --(Handover/Install)--> [FULFILLED]
+    |
+    +--(Timeout / Janitor)------> [EXPIRED]
+    +--(Checkout Cancelled)-----> [RELEASED]
+```
+
+---
+
+## 3. Module Specifications & Business Activities
+
+### 3.1 Module 1: Catalog & Services Module
+
+| Activity ID | Activity Name | Method & Proposed URI | Visibility | Concurrency & Data Target | Target p95 Latency |
+| :--- | :--- | :--- | :---: | :--- | :---: |
+| **ACT-PRD-001** | Search Tire & Parts Catalog | `GET /api/v1/automotive/products/catalog/tires` | PUBLIC | Composite B-Tree + pg_trgm index | < 35 ms |
+| **ACT-PRD-002** | Get Detailed SKU Specification | `GET /api/v1/automotive/products/catalog/{id}` | PUBLIC | Primary key lookup on `product_sku` | < 25 ms |
+| **ACT-PRD-015** | Filter Catalog by Brand | `GET /api/v1/automotive/products/catalog/brands` | PUBLIC | Cached brand lookup | < 30 ms |
+| **ACT-PRD-016** | Filter Catalog by Dimensions | `GET /api/v1/automotive/products/catalog/dimensions` | PUBLIC | Dimensional index (width, aspect, rim) | < 30 ms |
+| **ACT-PRD-017** | Query Product Families | `GET /api/v1/automotive/products/catalog/families` | PUBLIC | Category tree lookup | < 25 ms |
+| **ACT-PRD-020** | Ingest Product Catalog SKU Data | `POST /api/v1/automotive/products/admin/catalog/skus` | ADMIN | Local TX; creates SKU & spec records | < 80 ms |
+| **ACT-PRD-021** | Update Tire Spec Parameters | `PUT /api/v1/automotive/products/admin/catalog/skus/{id}/spec`| ADMIN | Optimistic version check | < 60 ms |
+| **ACT-PRD-022** | Archive Discontinued Product SKU| `DELETE /api/v1/automotive/products/admin/catalog/skus/{id}` | ADMIN | Soft delete / sets status ARCHIVED | < 50 ms |
+| **ACT-PRD-023** | Query Global Price Book | `GET /api/v1/automotive/products/catalog/prices` | PUBLIC / INTERNAL| Base price lookup | < 35 ms |
+| **ACT-PRD-027** | Synchronize Vendor Feeds | `POST /api/v1/automotive/products/admin/catalog/vendor-sync` | ADMIN | Batch vendor catalog ingestion | < 250 ms |
+| **ACT-PRD-029** | Define Global Automotive Service| `POST /api/v1/automotive/products/admin/services` | ADMIN | Models service labor & bay type | < 50 ms |
+| **ACT-PRD-030** | Configure Pricing Rules & Overrides| `POST /api/v1/automotive/products/admin/pricing-rules` | ADMIN | Authoritative base & store overrides | < 45 ms |
+
+---
+
+### 3.2 Module 2: Vehicle Fitment Module
+
+| Activity ID | Activity Name | Method & Proposed URI | Visibility | Concurrency & Data Target | Target p95 Latency |
+| :--- | :--- | :--- | :---: | :--- | :---: |
+| **ACT-PRD-003** | Lookup Vehicle Fitment (YMMT) | `GET /api/v1/automotive/products/fitment/lookup` | PUBLIC | Index on `(year, make_id, model_id, trim)` | < 25 ms |
+| **ACT-PRD-004** | Validate Tire Compatibility | `POST /api/v1/automotive/products/fitment/validate` | PUBLIC | Evaluates load index & diameter bounds | < 30 ms |
+| **ACT-PRD-005** | Filter Tires by Dimensions | `GET /api/v1/automotive/products/catalog/tires/dimensions` | PUBLIC | Dimensional composite index (`width, ratio, rim`) | < 30 ms |
+| **ACT-PRD-024** | Import OEM Vehicle Fitment Data | `POST /api/v1/automotive/products/admin/fitment/import` | ADMIN | Batch NHTSA vPIC fitment dataset | < 500 ms |
+| **ACT-PRD-026** | Register Staggered Fitments | `POST /api/v1/automotive/products/admin/fitment/staggered` | ADMIN | Front/rear tire pairing rules | < 55 ms |
+
+---
+
+### 3.3 Module 3: Branch Inventory & Stock Allocation Module
+
+| Activity ID | Activity Name | Method & Proposed URI | Visibility | Concurrency & Data Target | Target p95 Latency |
+| :--- | :--- | :--- | :---: | :--- | :---: |
+| **ACT-PRD-006** | Query Branch Stock Balances | `GET /api/v1/automotive/products/inventory/balances` | PUBLIC / INTERNAL| Read-committed ATP calculation | < 30 ms |
+| **ACT-PRD-007** | Batch Query Multi-Store Stock | `POST /api/v1/automotive/products/inventory/balances:batch`| INTERNAL / SAGA | Batch IN query across stores | < 45 ms |
+| **ACT-PRD-008** | Reserve Physical Stock | `POST /api/v1/automotive/products/inventory/reservations` | INTERNAL / SAGA | Conditional atomic update on `store_inventory`| < 35 ms |
+| **ACT-PRD-009** | Confirm Stock Allocation | `POST /api/v1/automotive/products/inventory/reservations/{id}/confirm`| INTERNAL / SAGA | Moves `reserved` -> `allocated`; `on_hand` same| < 40 ms |
+| **ACT-PRD-010** | Release / Compensate Stock Hold | `DELETE /api/v1/automotive/products/inventory/reservations/{id}`| INTERNAL / SAGA | Decrements `reserved` | < 35 ms |
+| **ACT-PRD-011** | Ingest Warehouse Goods Receipt | `POST /api/v1/automotive/products/inventory/receipts` | STAFF | Increments `quantity_on_hand` | < 60 ms |
+| **ACT-PRD-012** | Dispatch Inter-Branch Transfer | `POST /api/v1/automotive/products/inventory/transfers/dispatch` | STAFF | Decrements source `on_hand` | < 70 ms |
+| **ACT-PRD-013** | Receive Inbound Inter-Branch Transfer | `POST /api/v1/automotive/products/inventory/transfers/receive` | STAFF | Increments dest `on_hand` | < 65 ms |
+| **ACT-PRD-014** | Execute Physical Stock Adjustment | `POST /api/v1/automotive/products/inventory/adjustments` | STAFF / ADMIN | Audit record in `stock_movement` | < 55 ms |
+| **ACT-PRD-018** | Query Inventory Movement Ledger | `GET /api/v1/automotive/products/inventory/movements` | STAFF / ADMIN | Date-range partitioned query | < 50 ms |
+| **ACT-PRD-019** | Janitor Purge of Expired Holds | `NO HTTP ENDPOINT` (`ReservationJanitorJob`) | INTERNAL | Background janitor running every 60s | < 60s delay |
+| **ACT-PRD-025** | Reconcile Inventory vs Ledger | `POST /api/v1/automotive/products/inventory/reconcile` | ADMIN | Periodic integrity audit | < 200 ms |
+| **ACT-PRD-028** | Mark Damaged Stock | `POST /api/v1/automotive/products/inventory/damage` | STAFF | Decrements `on_hand`; writes scrap audit | < 45 ms |
+| **ACT-PRD-031** | Record Physical Stock Handover | `POST /api/v1/automotive/products/inventory/fulfill-handover`| INTERNAL / STAFF | Decrements `quantity_allocated` AND `on_hand` | < 60 ms |
+
+#### Detailed Endpoint Specification: ACT-PRD-008 (Reserve Physical Stock)
+- **HTTP Method & Path**: `POST /api/v1/automotive/products/inventory/reservations` (Visibility: INTERNAL)
+- **Request Headers**: `Idempotency-Key: {uuid}`, `Authorization: Bearer {internal_token}`
+- **Request Body**:
+  ```json
+  {
+    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+    "quantity": 4,
+    "ttl_minutes": 15,
+    "order_id": "ord-20261123-0091"
+  }
+  ```
+- **Response**: `201 Created`
+  ```json
+  {
+    "reservation_id": "res-9988-7766-5544",
+    "status": "HELD",
+    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+    "quantity": 4,
+    "expires_at": "2026-11-23T23:35:00Z"
+  }
+  ```
+- **Concurrency Algorithm (Atomic Conditional Update)**:
+  ```sql
+  UPDATE store_inventory
+  SET quantity_reserved = quantity_reserved + :req_qty
+  WHERE store_id = :store_id
+    AND sku_id = :sku_id
+    AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty
+  RETURNING id, quantity_on_hand, quantity_reserved, quantity_allocated;
+  ```
+### 3.4 Rigorous Inventory Commands & Lifecycle Transitions
+
+To maintain strict physical accounting, financial auditability, and prevent blind counter decrements upon events, `automotive-product` exposes separate, conditionally verified commands for each distinct inventory lifecycle event:
+
+```mermaid
+stateDiagram-v2
+    [*] --> ATP : Physical Stock Received (ACT-PRD-011)
+    ATP --> RESERVED : 1. Checkout Hold (ACT-PRD-008)
+    RESERVED --> ATP : 1a. Checkout Aborted / Expired (ACT-PRD-010)
+    RESERVED --> ALLOCATED : 2. Payment Succeeded (ACT-PRD-009)
+    ALLOCATED --> ATP : 2a. Order Cancelled Prior to Fulfillment (ACT-PRD-010B)
+    ALLOCATED --> HANDED_OVER : 3. Counter Pickup Handover / Service Installed (ACT-PRD-031)
+    HANDED_OVER --> RETURNED : 4. Physically Returned & Inspected (ACT-PRD-014)
+    RETURNED --> ATP : Restocked to Available Inventory
+```
+
+1. **Release Active Checkout Reservation (`ACT-PRD-010`)**:
+   - *Trigger*: Checkout saga compensation or expiration janitor (`ACT-PRD-019`).
+   - *State Transition*: `quantity_reserved = quantity_reserved - :qty` (where `status = 'ACTIVE'`).
+   - *Effect on On-Hand*: `quantity_on_hand` unchanged. Restores Available-to-Promise ($	ext{ATP}$).
+2. **Cancel Confirmed Order Allocation (`ACT-PRD-010B` - Allocation Cancellation)**:
+   - *Endpoint*: `POST /api/v1/automotive/products/inventory/allocations/{id}/cancel`
+   - *Trigger*: Post-payment order cancellation (`ACT-OPS-007`).
+   - *Preconditions*: Allocation must be in state `ALLOCATED_PENDING_FULFILLMENT`.
+   - *State Transition*: `quantity_allocated = quantity_allocated - :qty` (where `id = :allocationId AND status = 'ALLOCATED'`).
+   - *Effect on On-Hand*: `quantity_on_hand` unchanged. Restores $	ext{ATP}$. Emits `StockAllocationCancelledEvent`.
+   - *Duplicate / Concurrent Handling*: If already fulfilled (`HANDED_OVER`), cancellation is rejected with HTTP 409 Conflict.
+3. **Partial Order Fulfillment**:
+   - Supports line-level fulfillment tracking: records `fulfilled_quantity` on allocation item. Decrements `quantity_allocated` and `quantity_on_hand` strictly by fulfilled quantity. Unfulfilled remainder stays allocated until subsequent fulfillment or explicit partial cancellation.
+4. **Physical Handover / Installation (`ACT-PRD-031`)**:
+   - *Trigger*: Customer carry-out PIN verification (`ACT-OPS-016`) or technician work order finalization (`ACT-OPS-014`).
+   - *Preconditions*: Allocation status must be `ALLOCATED`.
+   - *State Transition*: `quantity_on_hand = quantity_on_hand - :qty, quantity_allocated = quantity_allocated - :qty`.
+   - *Effect on ATP*: $	ext{ATP}$ formula remains identical since both on-hand and allocated drop by the same quantity.
+5. **Physical Goods Return, Inspection & Disposition (`ACT-PRD-014` & `ACT-PRD-028`)**:
+   - *Strict Accounting Principle*: Physically returned items are NEVER automatically returned to sellable Available-to-Promise inventory.
+   - *Mandatory Inspection & Quarantine*:
+     - When tires are returned physically to a store counter, store staff issues `POST /api/v1/automotive/products/inventory/returns/intake`. Stock enters `RETURNED_QUARANTINE` status in `inventory_quarantine_item`. `quantity_on_hand` and Available-to-Promise ($	ext{ATP}$) remain unchanged.
+     - Store manager or certified technician conducts physical inspection for tread wear (32nds inch gauge), bead tears, punctures, and mounting marks.
+   - *Formal Disposition Outcomes*:
+     - *Outcome A (Sellable - Full Restock)*: If unmounted and pristine, manager approves restock (`ACT-PRD-014`). Executes `quantity_on_hand = quantity_on_hand + :qty` with audit reason `RMA_RESTOCK_APPROVED`. Stock returns to $	ext{ATP}$.
+     - *Outcome B (Damaged / Unsellable)*: If damaged or worn, item is written off via `ACT-PRD-028` (`Mark Damaged Stock`). Stock moves to salvage scrap inventory; never enters $	ext{ATP}$.
+     - *Outcome C (Warranty / Factory Defect)*: Item logged into `warranty_dispute_log` for vendor credit claims against distributor/OEM.
+     - *Outcome D (Service Rework / Dispute)*: Defective installation rework consumes warranty parts without charging customer; logged against original `work_order_id`.
+6. **Accounting for Consumed Service Parts**:
+   - Shop supplies (valve stems, wheel weights, oil) consumed during work orders are deducted directly from on-hand inventory via `ACT-PRD-031` linked to the `work_order_id`, recording permanent audit entries in `inventory_movement_ledger`.
+
+---
+
+## 4. Background Operations & Daemons
+1. **`ReservationJanitorJob`** (`ACT-PRD-019`): Runs every 60 seconds; selects expired holds with `FOR UPDATE SKIP LOCKED`; releases `quantity_reserved`; marks reservations `EXPIRED`.
+2. **`StockLedgerArchivalJob`**: Runs daily at 02:00 AM; archives movement ledger records older than 365 days into cold storage.
