@@ -1,6 +1,10 @@
-# Architecture Decision Register
+# Architecture Decision Register (Root Index)
 
-## Approved and stable
+> **Canonical Decision Authority**: The single master architecture decision register is [`service-blueprints/approved-decisions.md`](./service-blueprints/approved-decisions.md) (retaining `ADR-01`–`ADR-18`, Part 0 governance rules `GOV-01`–`GOV-05`, and approved correction directions `COR-DIR-01`–`COR-DIR-10`).
+> **Correction Remediation Tracker**: All 132 Round-2 audit findings across Parts 0–12 are tracked in [`service-blueprints/architecture-correction-register.md`](./service-blueprints/architecture-correction-register.md).
+> This root document preserves original technology/product scope decisions and open verification gates without creating a competing decision authority.
+
+## Approved and stable (Foundational Stack & Scope)
 - **Scope:** one automotive company with multiple branches; web, Android and iOS; tire sales, repair management, inventory and used-car sales.
 - **Business boundaries:** precisely eight independent microservices in Automotive Services, Used-Car Sales and Shared Platform, as defined in `02-service-architecture.md`.
 - **Backend:** Java 25 LTS, Spring Boot 4.2.x, appropriate Spring Cloud 2026.0.x modules, Gradle **Kotlin DSL** (business code still Java), Spring MVC REST.

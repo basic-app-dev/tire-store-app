@@ -3,7 +3,7 @@
 [← Back to Agent Overview](README.md)
 
 - **Role**: Repository Operations & Fast Inspector
-- **Assigned Model**: Flash 3.8
+- **Assigned Model**: Gemini 4 Hydrogen
 - **Assigned Skills**: `ponytail`, `fast-search`, `jira-linker`
 - **Native Definition**: [`.agents/agents/scout.md`](../../.agents/agents/scout.md)
 

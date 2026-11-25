@@ -15,10 +15,10 @@ flowchart TD
 
     subgraph AgentSwarm["Specialized Sub-Agent Swarm"]
         ARCH["@architect\nClaude Opus 4.6\nPostgreSQL Isolation, Flyway & Events"]
-        BUILD["@builder\nFlash 3.8\nSpring Boot, Next.js & Expo"]
-        UI["@ui-designer\nFlash 3.8\nDesign System & Tailwind"]
+        BUILD["@builder\nGemini 4 Hydrogen\nSpring Boot, Next.js & Expo"]
+        UI["@ui-designer\nGemini 4 Hydrogen\nDesign System & Tailwind"]
         QA["@qa-tester\nGPT OSS 120B\nJUnit, Testcontainers & Playwright"]
-        SCOUT["@scout\nFlash 3.8\nBoundaries, Builds & Jira"]
+        SCOUT["@scout\nGemini 4 Hydrogen\nBoundaries, Builds & Jira"]
     end
 
     MGR --> ARCH
@@ -42,10 +42,10 @@ flowchart TD
 | :----------------------------------- | :--------------------------------------------------------------------- | :------------------ | :---------------------------------------------------- | :----------------------------------------------------------------------------- | :--------------------------------------------- |
 | [**`@manager`**](manager.md)         | [`.agents/agents/manager.md`](../../.agents/agents/manager.md)         | **Claude Opus 4.6** | Central Orchestrator & Task Master                    | `superpowers`, `ponytail`, `fast-search`, `jira-linker`                        | File R/W/Edit, Shell, Task Manager, Web Search |
 | [**`@architect`**](architect.md)     | [`.agents/agents/architect.md`](../../.agents/agents/architect.md)     | **Claude Opus 4.6** | PostgreSQL Isolation, Flyway, PostGIS, Events, OpenAPI| `superpowers`, `sql-optimizer`, `postgis-spatial`                              | File R/W/Edit, Shell, Web Search               |
-| [**`@builder`**](builder.md)         | [`.agents/agents/builder.md`](../../.agents/agents/builder.md)         | **Flash 3.8**       | Spring Boot, Next.js, Expo, Payments, Saga            | `superpowers`, `ponytail`, `refactor-wizard`, `stripe-payments`, `expo-native` | File R/W/Edit, Shell, Task Manager, Web Search |
-| [**`@ui-designer`**](ui-designer.md) | [`.agents/agents/ui-designer.md`](../../.agents/agents/ui-designer.md) | **Flash 3.8**       | Design System, Cross-Platform UI, Accessibility       | `impeccable`, `tailwind-master`, `accessibility-audit`, `expo-native`          | File R/W/Edit, Shell                           |
-| [**`@qa-tester`**](qa-tester.md)     | [`.agents/agents/qa-tester.md`](../../.agents/agents/qa-tester.md)     | **GPT OSS 120B**    | Test Automation: JUnit 5, Testcontainers, Playwright  | `playwright`, `vitest-runner`, `ci-validator`                                  | File R/W/Edit, Shell, Task Manager             |
-| [**`@scout`**](scout.md)             | [`.agents/agents/scout.md`](../../.agents/agents/scout.md)             | **Flash 3.8**       | Boundaries, Standalone Builds, Lint, Jira Traceability| `ponytail`, `fast-search`, `jira-linker`                                       | File R/W/Edit, Shell                           |
+| [**`@builder`**](builder.md)         | [`.agents/agents/builder.md`](../../.agents/agents/builder.md)         | **Gemini 4 Hydrogen** | Spring Boot, Next.js, Expo, Payments, Saga            | `superpowers`, `ponytail`, `refactor-wizard`, `stripe-payments`, `expo-native` | File R/W/Edit, Shell, Task Manager, Web Search |
+| [**`@ui-designer`**](ui-designer.md) | [`.agents/agents/ui-designer.md`](../../.agents/agents/ui-designer.md) | **Gemini 4 Hydrogen** | Design System, Cross-Platform UI, Accessibility       | `impeccable`, `tailwind-master`, `accessibility-audit`, `expo-native`          | File R/W/Edit, Shell                           |
+| [**`@qa-tester`**](qa-tester.md)     | [`.agents/agents/qa-tester.md`](../../.agents/agents/qa-tester.md)     | **GPT OSS 120B**      | Test Automation: JUnit 5, Testcontainers, Playwright  | `playwright`, `vitest-runner`, `ci-validator`                                  | File R/W/Edit, Shell, Task Manager             |
+| [**`@scout`**](scout.md)             | [`.agents/agents/scout.md`](../../.agents/agents/scout.md)             | **Gemini 4 Hydrogen** | Boundaries, Standalone Builds, Lint, Jira Traceability| `ponytail`, `fast-search`, `jira-linker`                                       | File R/W/Edit, Shell                           |
 
 ---
 

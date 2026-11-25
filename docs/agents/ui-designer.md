@@ -3,7 +3,7 @@
 [← Back to Agent Overview](README.md)
 
 - **Role**: Design System & UI/UX Specialist
-- **Assigned Model**: Flash 3.8
+- **Assigned Model**: Gemini 4 Hydrogen
 - **Assigned Skills**: `impeccable`, `tailwind-master`, `accessibility-audit`, `expo-native`
 - **Native Definition**: [`.agents/agents/ui-designer.md`](../../.agents/agents/ui-designer.md)
 

@@ -3,7 +3,7 @@
 [← Back to Agent Overview](README.md)
 
 - **Role**: Core Full-Stack Developer
-- **Assigned Model**: Flash 3.8
+- **Assigned Model**: Gemini 4 Hydrogen
 - **Assigned Skills**: `superpowers`, `ponytail`, `refactor-wizard`, `stripe-payments`, `expo-native`
 - **Native Definition**: [`.agents/agents/builder.md`](../../.agents/agents/builder.md)
 

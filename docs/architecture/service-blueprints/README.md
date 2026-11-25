@@ -14,13 +14,14 @@ This navigation directory directs developers and architects to the single canoni
 
 ### System-Wide Architecture Specifications
 
-| Canonical Document | Primary Architectural Role & Contents |
-| :--- | :--- |
-| **[`system-architecture.md`](./system-architecture.md)** | **System Architecture & Boundaries**: Capability hierarchy, microservice portfolio (ports 8091–8098), 18 substantive modules, strict isolation rules, and package-by-layer structure. |
-| **[`approved-decisions.md`](./approved-decisions.md)** | **Architecture Decisions & Policies**: Authoritative ADR catalog (ADR-01 through ADR-18) and formal classification of numerical parameters (holds, TTLs, deposit amounts). |
-| **[`logical-strategies.md`](./logical-strategies.md)** | **Logical Strategies & Concurrency**: Evaluated trade-offs and algorithms for inventory conditional updates, Redis active carts, cart revalidation, unified service modeling, and GiST bay scheduling. |
-| **[`cross-service-workflows.md`](./cross-service-workflows.md)** | **Cross-Service Workflows & Sagas**: Complete end-to-end distributed business journeys (WF-01 through WF-12) with Mermaid sequence diagrams, state machines, and compensation paths. |
-| **[`slo-and-capacity.md`](./slo-and-capacity.md)** | **SLOs, Capacity & API Standards**: Sizing models (15 to 50 stores), activity latency targets (Tier 1–4), RFC 7807 error schema, idempotency headers, and background daemons. |
+| Canonical Document                                                                 | Primary Architectural Role & Contents                                                                                                                                                                                                                                                                          |
+| :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **[`system-architecture.md`](./system-architecture.md)**                           | **System Architecture & Boundaries**: Capability hierarchy, microservice portfolio (ports 8091–8098), 18 substantive modules, strict isolation rules, and package-by-layer structure.                                                                                                                          |
+| **[`approved-decisions.md`](./approved-decisions.md)**                             | **Master Architecture Decision Register (Canonical)**: Authoritative ADR catalog (`ADR-01`–`ADR-18`), Part 0 governance rules (`GOV-01`–`GOV-05`), approved correction directions (`COR-DIR-01`–`COR-DIR-10`), and provenance/conflict notes.                                                                  |
+| **[`architecture-correction-register.md`](./architecture-correction-register.md)** | **132-Finding Architecture Correction Register**: Binding Part 0–12 remediation tracker for `Tire_Store_Architecture_Deep_Audit_Round2_2026-11-25.md`. _(Note: Stale activity/endpoint counts in this index will be reconciled in Part 12; a documented design here is not evidence of runtime verification.)_ |
+| **[`logical-strategies.md`](./logical-strategies.md)**                             | **Logical Strategies & Concurrency**: Evaluated trade-offs and algorithms for inventory conditional updates, Redis active carts, cart revalidation, unified service modeling, and GiST bay scheduling.                                                                                                         |
+| **[`cross-service-workflows.md`](./cross-service-workflows.md)**                   | **Cross-Service Workflows & Sagas**: Complete end-to-end distributed business journeys (WF-01 through WF-12) with Mermaid sequence diagrams, state machines, and compensation paths.                                                                                                                           |
+| **[`slo-and-capacity.md`](./slo-and-capacity.md)**                                 | **SLOs, Capacity & API Standards**: Sizing models (15 to 50 stores), activity latency targets (Tier 1–4), RFC 7807 error schema, idempotency headers, and background daemons.                                                                                                                                  |
 
 ---
 
@@ -28,17 +29,17 @@ This navigation directory directs developers and architects to the single canoni
 
 Each standalone microservice is fully specified in its single canonical reference file, containing bounded contexts, substantive modules, activity catalogs, API endpoint contracts, background daemons, and concurrency controls:
 
-| Microservice Document | Port | Primary Responsibility | Modules | Activities | API Endpoints |
-| :--- | :---: | :--- | :---: | :---: | :---: |
-| **[`services/automotive-operations.md`](./services/automotive-operations.md)** | 8091 | Active Carts, Checkout Sagas, Orders, Work Orders, Quotes | 3 | 22 | 18 |
-| **[`services/automotive-product.md`](./services/automotive-product.md)** | 8092 | Tire/Parts Catalog, Services, Fitment, Inventory Ledger | 3 | 31 | 24 |
-| **[`services/vehicle-sales.md`](./services/vehicle-sales.md)** | 8093 | Used Car Deals, Test Drives, Deposits & Sales Sagas | 2 | 7 | 6 |
-| **[`services/vehicle-product.md`](./services/vehicle-product.md)** | 8094 | VIN-Specific Inventory, 150-Pt Inspections, Listings | 2 | 10 | 8 |
-| **[`services/notification.md`](./services/notification.md)** | 8095 | Multi-Channel Delivery (SMS, Email, Push) & Templates | 2 | 9 | 6 |
-| **[`services/identity-access.md`](./services/identity-access.md)** | 8096 | User Profiles, Keycloak Sync, Store RBAC & Garage | 2 | 7 | 6 |
-| **[`services/appointment.md`](./services/appointment.md)** | 8097 | Service Appointments, Rescheduling & Entitlements | 2 | 10 | 8 |
-| **[`services/store-management.md`](./services/store-management.md)** | 8098 | Stores, Facilities, Hours, Capabilities & GiST Bay Holds | 2 | 13 | 10 |
-| **TOTAL** | — | **8 Standalone Microservices** | **18** | **109** | **92** |
+| Microservice Document                                                          | Port | Primary Responsibility                                    | Modules | Activities | API Endpoints |
+| :----------------------------------------------------------------------------- | :--: | :-------------------------------------------------------- | :-----: | :--------: | :-----------: |
+| **[`services/automotive-operations.md`](./services/automotive-operations.md)** | 8091 | Active Carts, Checkout Sagas, Orders, Work Orders, Quotes |    3    |     22     |      18       |
+| **[`services/automotive-product.md`](./services/automotive-product.md)**       | 8092 | Tire/Parts Catalog, Services, Fitment, Inventory Ledger   |    3    |     31     |      24       |
+| **[`services/vehicle-sales.md`](./services/vehicle-sales.md)**                 | 8093 | Used Car Deals, Test Drives, Deposits & Sales Sagas       |    2    |     7      |       6       |
+| **[`services/vehicle-product.md`](./services/vehicle-product.md)**             | 8094 | VIN-Specific Inventory, 150-Pt Inspections, Listings      |    2    |     10     |       8       |
+| **[`services/notification.md`](./services/notification.md)**                   | 8095 | Multi-Channel Delivery (SMS, Email, Push) & Templates     |    2    |     9      |       6       |
+| **[`services/identity-access.md`](./services/identity-access.md)**             | 8096 | User Profiles, Keycloak Sync, Store RBAC & Garage         |    2    |     7      |       6       |
+| **[`services/appointment.md`](./services/appointment.md)**                     | 8097 | Service Appointments, Rescheduling & Entitlements         |    2    |     10     |       8       |
+| **[`services/store-management.md`](./services/store-management.md)**           | 8098 | Stores, Facilities, Hours, Capabilities & GiST Bay Holds  |    2    |     13     |      10       |
+| **TOTAL**                                                                      |  —   | **8 Standalone Microservices**                            | **18**  |  **109**   |    **92**     |
 
 ---
 
@@ -57,6 +58,7 @@ Phase 2F-C provides the complete physical database models, PostgreSQL DDL schema
 ## 4. Implementation Road Ahead (Phase 3 Backend Engineering)
 
 Following owner acceptance of this Phase 2F-C data architecture baseline:
+
 - Spring Boot Flyway database migrations (`V1__initial_schema.sql`) will be implemented for each microservice.
 - Redis key serialization templates and Redis Lua scripts will be coded in `automotive-operations`.
 - Spring Security OIDC and APISIX JWT routing policies will be verified against the RBAC definitions.
