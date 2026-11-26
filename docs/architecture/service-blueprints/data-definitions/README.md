@@ -33,7 +33,7 @@ Each standalone microservice owns an implementation-ready data specification det
 | Service Specification | Port | Primary Storage | Key Tables / Redis Namespaces |
 | :--- | :---: | :--- | :--- |
 | **[`services/automotive-operations.md`](./services/automotive-operations.md)** | 8091 | PostgreSQL + Redis | `orders`, `order_items`, `checkout_saga_instance`, `work_orders`, `work_order_tasks`, `supplemental_quotes`; Redis `cart:{id}` |
-| **[`services/automotive-product.md`](./services/automotive-product.md)** | 8092 | PostgreSQL | `product_skus`, `tire_specifications`, `service_definitions`, `pricing_rules`, `store_inventory`, `stock_reservations`, `stock_movements` |
+| **[`services/automotive-product.md`](./services/automotive-product.md)** | 8092 | PostgreSQL | `product_category`, `brand`, `physical_product`, `tire_spec`, `wiper_spec`, `wheel_spec`, `brake_spec`, `service`, `store_service_price`, `vehicle_configuration`, fitment evidence, `store_inventory`, `stock_reservations`, `stock_movements` |
 | **[`services/vehicle-sales.md`](./services/vehicle-sales.md)** | 8093 | PostgreSQL + S3 | `sales_deals`, `holding_deposits`, `sales_contracts`, `trade_in_appraisals`, `vehicle_sales_sagas` |
 | **[`services/vehicle-product.md`](./services/vehicle-product.md)** | 8094 | PostgreSQL + S3 | `vin_vehicles`, `mechanical_inspections`, `vin_sales_holds`, `vehicle_listings`, `vehicle_photos` |
 | **[`services/notification.md`](./services/notification.md)** | 8095 | PostgreSQL | `notification_templates`, `customer_preferences`, `notification_requests`, `delivery_attempts` |

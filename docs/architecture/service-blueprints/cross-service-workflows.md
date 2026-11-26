@@ -44,7 +44,7 @@ Master Business Workflows
 - **Trigger**: Customer adds tires, road hazard warranty, and installation services to cart.
 - **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092).
 - **Sequence**:
-  1. Client calls `POST /api/v1/automotive/operations/cart/{id}/items` with `sku_id`, `quantity`, and target `store_id`.
+  1. Client calls `POST /api/v1/automotive/operations/cart/{id}/items` with `item_type` (`PHYSICAL_PRODUCT` | `SERVICE`), `physical_product_id` or `service_id`, `quantity`, and target `store_id`.
   2. `automotive-operations` executes atomic Redis Lua script updating cart JSON document, returning updated totals.
   3. Customer switches to browser tab or enters checkout: Client calls `POST /api/v1/automotive/operations/cart/{id}/validate`.
   4. `automotive-operations` batch-checks inventory and price freshness against `automotive-product` (`POST /api/v1/automotive/products/inventory/balances:batch`).

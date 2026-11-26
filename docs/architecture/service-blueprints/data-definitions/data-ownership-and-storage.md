@@ -11,14 +11,14 @@ Every piece of mutable business state has exactly one authoritative owning servi
 
 | Logical Business Entity | Authoritative Owner | Owning Module | Storage Engine | Scope & Identifier | Read Consumers | Consistency Model | Retention Policy |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Physical Product / SKU** | `automotive-product` | Catalog & Services | PostgreSQL | Global UUID (`sku_id`) | Operations, Search, Web/Mobile | Strong Authoritative | Permanent / Soft-Archive |
-| **Tire Specification** | `automotive-product` | Catalog & Services | PostgreSQL | 1:1 on `sku_id` | Operations, Web/Mobile | Strong Authoritative | Permanent |
-| **Service Definition** | `automotive-product` | Catalog & Services | PostgreSQL | Global UUID (`service_id`) | Operations, Appointment, Web | Strong Authoritative | Permanent |
-| **Pricing Rules & Overrides** | `automotive-product` | Catalog & Services | PostgreSQL | Global / Store (`store_id, item_id`) | Operations, Web/Mobile | Strong Authoritative | Versioned Active |
-| **Vehicle Fitment (YMMT)** | `automotive-product` | Vehicle Fitment | PostgreSQL | Composite (Y/M/M/T) | Identity, Web/Mobile | Strong Authoritative | Permanent Reference |
-| **Branch Inventory Balance** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, sku_id)` | Operations, Web/Mobile | Strong Authoritative | Permanent Active |
+| **Physical Product** | `automotive-product` | Catalog & Services | PostgreSQL | Global UUID (`physical_product.id`, `sku_code`) | Operations, Search, Web/Mobile | Strong Authoritative | Active (`ON DELETE RESTRICT`, no archival state machine) |
+| **Typed Category Specs** | `automotive-product` | Catalog & Services | PostgreSQL | 1:1 on `(physical_product_id, category_code)` (`tire_spec`, `wiper_spec`, `wheel_spec`, `brake_spec`, extensible via additive `<cat>_spec` or schema-validated `extra_specs`) | Operations, Web/Mobile | Strong Authoritative | Permanent |
+| **Service Variant** | `automotive-product` | Catalog & Services | PostgreSQL | Global UUID (`service.id`, `service_code`) | Operations, Appointment, Web | Strong Authoritative | Permanent |
+| **Store Service Price** | `automotive-product` | Catalog & Services | PostgreSQL | `(store_id, service_id)` (`price_cents` USD) | Operations, Web/Mobile | Strong Authoritative | Current Active (no price history) |
+| **Vehicle Configuration & Fitment** | `automotive-product` | Vehicle Fitment | PostgreSQL | `vehicle_configuration` + category evidence tables | Identity, Web/Mobile | Strong Authoritative | Permanent Reference |
+| **Branch Inventory Balance** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` | Operations, Web/Mobile | Strong Authoritative | Permanent Active |
 | **Stock Reservation (Hold)** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`reservation_id`) | Operations (Checkout Saga) | Local ACID | 15m TTL / Janitor Purge |
-| **Confirmed Allocation** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, sku_id)` counter | Operations, Fulfillment | Local ACID | Until Handover |
+| **Confirmed Allocation** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` counter | Operations, Fulfillment | Local ACID | Until Handover |
 | **Physical Stock Movement** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`movement_id`) | Staff, Audit, Accounting | Immutable Append-Only | 7 Years (Partitioned) |
 | **Active Shopping Cart** | `automotive-operations`| Cart & Checkout | Redis String JSON | UUID (`cart_id`) | Web, Mobile, Operations | In-Memory / Optimistic | 7-day TTL (Auth) / 48h (Guest) |
 | **Commercial Order** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_id`) | Customer, Staff, Accounting | Local ACID | 7 Years (Permanent) |

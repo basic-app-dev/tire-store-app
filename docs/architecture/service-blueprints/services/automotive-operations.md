@@ -28,7 +28,7 @@ automotive-operations (Port 8091)
 ### 2.1 Core Entities Owned
 1. `cart` (Redis String JSON): `cart_id`, `version`, `store_id`, `updated_at`, `items[]`.
 2. `order_record` (PostgreSQL): `id`, `order_number`, `customer_id`, `store_id`, `status`, `total_amount_cents`, `currency`, `created_at`.
-3. `order_line_item` (PostgreSQL): `id`, `order_id`, `sellable_item_id`, `item_type`, `sku_code`, `description`, `quantity`, `unit_price_cents`, `booking_status`.
+3. `order_line_item` (PostgreSQL): `id`, `order_id`, `item_type` (`PHYSICAL_PRODUCT` | `SERVICE`), `physical_product_id` (nullable XOR), `service_id` (nullable XOR), `sku_code`, `description`, `quantity`, `unit_price_cents`, `booking_status`.
 4. `checkout_attempt` (PostgreSQL): `id`, `cart_id`, `cart_version`, `customer_id`, `store_id`, `idempotency_key`, `payment_intent_id`, `status` (`INITIATED`, `HOLDS_ACQUIRED`, `PAYMENT_PENDING`, `AUTHORIZED`, `SETTLED`, `COMPLETED`, `EXPIRED`, `FAILED`, `CANCELLED`), `expires_at`, `created_at`.
    - *Lifecycle-Wide Uniqueness (Partial Unique Index)*: Enforced via PostgreSQL index:
      ```sql
@@ -78,7 +78,8 @@ Work Order State Machine:
 - **Request Body**:
   ```json
   {
-    "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+    "item_type": "PHYSICAL_PRODUCT",
+    "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
     "quantity": 4,
     "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
     "selected_vehicle": { "year": 2022, "make": "Toyota", "model": "RAV4", "trim": "XLE" }

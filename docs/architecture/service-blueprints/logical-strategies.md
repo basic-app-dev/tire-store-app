@@ -108,16 +108,12 @@ When catalog prices change or stock depletes while a customer has items in an ac
 ### 5.1 The Problem
 Physical products (tires, wheels, parts) and automotive services (mounting, balancing, alignment, oil changes) must coexist in customer carts, quotes, and work orders while preserving their fundamentally different operational semantics (physical stock vs. technician labor and bay capacity).
 
-### 5.2 The Strategy
-- **Shared Sellable Item Identity**: Both physical goods and service offerings inherit a unified base abstraction (`sellable_item_id`, `item_type`, `base_price`, `tax_category`).
+### 5.2 The Strategy (`P2-DEC-01`, `P2-DEC-02`, `P2-DEC-03`, `P2-DEC-05`)
+- **Separate Catalogs (No Mandatory `sellable_item` Table)**: Physical goods and purchasable services are distinct entities (`physical_product` vs `service`) with typed line references (`item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')` + XOR `physical_product_id` / `service_id`).
 - **Domain Specialization**:
-  - `PRODUCT`: Refers to a physical SKU, links to `tire_specification`, requires branch inventory tracking, fits vehicles via YMMT rules.
-  - `SERVICE`: Refers to labor/procedure, links to `service_definition` (duration in minutes, required equipment bay types, skill level), requires appointment slot or `SCHEDULE_LATER` entitlement, does **not** consume physical stock (unless bundled with required parts).
-- **Service Pricing Models**:
-  - `FIXED`: Flat fee (e.g., standard oil change: \$49.99).
-  - `CALCULATED_TIER`: Calculated dynamically (e.g., tire mount/balance: \$20/tire for $\le 17"$, \$30/tire for $\ge 18"$).
-  - `ESTIMATED_STARTING_AT`: Baseline diagnostic fee; final bill subject to technician inspection.
-  - `QUOTE_REQUIRED`: Specialized repairs; cannot be paid online without work-order quote approval.
+  - `PHYSICAL_PRODUCT`: Extensible `product_category` (no fixed 4-category constraint; PostgreSQL only, zero NoSQL). Core categories use typed 1:1 spec tables (`tire_spec`, `wiper_spec`, `wheel_spec`, `brake_spec`) + `extra_specs JSONB`; new categories (e.g., `WINDSHIELD`) onboard via `product_category` + additive `<cat>_spec` or `extra_specs_schema`-validated attributes without altering `physical_product`. Uses **one nationwide USD `physical_product.price_cents`**, tracks branch inventory in `store_inventory`, and evaluates fitment via category-specific evidence rules (`COMPATIBLE` / `INCOMPATIBLE` / `UNKNOWN`, where missing or conflicting evidence never yields `COMPATIBLE`).
+  - `SERVICE`: Links to distinct service package variants (`service`, e.g., `INSTALL_1_WHEEL`, `INSTALL_2_WHEELS`, `INSTALL_4_WHEELS` with `wheel_count`, duration, and required capability), uses **store-specific fixed USD `store_service_price.price_cents`** keyed by `(store_id, service_id)` (no default service price, no fallback override; absent row = not sellable at that store), and does **not** track physical inventory.
+- **No Pricing-Rule Engine or Archival Feature**: Pricing is minimal US-only fixed integer `price_cents` (USD); taxes/fees are assessed separately at checkout. No `DISCONTINUED`/`ARCHIVED` state machine, pricing history, or formula engine is included.
 
 ---
 

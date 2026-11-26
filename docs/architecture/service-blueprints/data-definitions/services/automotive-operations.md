@@ -120,14 +120,20 @@ CREATE INDEX idx_entitlement_customer ON automotive_operations.service_entitleme
 CREATE TABLE automotive_operations.order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
-    sellable_item_id UUID NOT NULL,
-    item_type VARCHAR(16) NOT NULL CHECK (item_type IN ('PRODUCT', 'SERVICE')),
-    sku_code VARCHAR(64) NOT NULL,
+    item_type VARCHAR(24) NOT NULL CHECK (item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')),
+    physical_product_id UUID NULL, -- Opaque reference to automotive_product.physical_product(id); NO cross-DB FK
+    service_id UUID NULL,          -- Opaque reference to automotive_product.service(id); NO cross-DB FK
+    sku_code VARCHAR(64) NULL,     -- Populated for PHYSICAL_PRODUCT snapshot only
     description VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
     total_price_cents INTEGER NOT NULL CHECK (total_price_cents >= 0),
     booking_status VARCHAR(32) NOT NULL DEFAULT 'NOT_APPLICABLE',
+    CONSTRAINT chk_item_typed_reference CHECK (
+        (item_type = 'PHYSICAL_PRODUCT' AND physical_product_id IS NOT NULL AND service_id IS NULL)
+        OR
+        (item_type = 'SERVICE' AND service_id IS NOT NULL AND physical_product_id IS NULL)
+    ),
     CONSTRAINT chk_item_booking_status CHECK (booking_status IN (
         'NOT_APPLICABLE', 'ENTITLED_UNSCHEDULED', 'SCHEDULED', 'COMPLETED'
     ))
@@ -273,8 +279,9 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
     "items": [
       {
         "line_id": "li-01",
-        "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
-        "item_type": "PRODUCT",
+        "item_type": "PHYSICAL_PRODUCT",
+        "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+        "sku_code": "MIC-DEF2-2256517",
         "title": "Michelin Defender 2 225/65R17",
         "quantity": 4,
         "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
@@ -283,12 +290,13 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
       },
       {
         "line_id": "li-02",
-        "sku_id": "srv-mount-balance-17",
         "item_type": "SERVICE",
-        "title": "Tire Mounting & Balancing",
-        "quantity": 4,
+        "service_id": "a1b2c3d4-0004-4000-8000-000000000004",
+        "service_code": "INSTALL_4_WHEELS",
+        "title": "Tire Mounting & Balancing (4-Wheel Package)",
+        "quantity": 1,
         "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-        "unit_price_cents": 2000,
+        "unit_price_cents": 8000,
         "linked_product_line_id": "li-01"
       }
     ]
