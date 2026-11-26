@@ -44,6 +44,8 @@ Every piece of mutable business state has exactly one authoritative owning servi
 | **Customer Virtual Garage** | `identity-access` | Customer Garage | PostgreSQL | UUID (`garage_vehicle_id`) | Customer, Fitment, Operations | Strong Authoritative | User Managed |
 | **Notification Template** | `notification` | Governance | PostgreSQL | String Code + Version | Operations, Appointment, Sales | Versioned Read | Permanent |
 | **Delivery Attempt & Log** | `notification` | Multi-Channel Delivery| PostgreSQL | UUID (`attempt_id`) | Audit, Staff | Immutable Log | 1 Year |
+| **Transactional Outbox (`outbox_event`)** | Each Producing Service | Messaging Infrastructure | PostgreSQL (`<service_schema>`) | UUID (`id` / `event_id`) | Own `TransactionalOutboxRelay` | Local ACID (`PENDING`/`CLAIMED`/`PUBLISHED`/`BLOCKED`) | 7 Days post-publish (`PUBLISHED` only) |
+| **Consumer Inbox (`consumer_inbox`)** | Each Consuming Service | Messaging Infrastructure | PostgreSQL (`<service_schema>`) | `(consumer_name, event_id)` | Own Event Handlers | Local ACID Deduplication | Operational Retention Window |
 
 ---
 

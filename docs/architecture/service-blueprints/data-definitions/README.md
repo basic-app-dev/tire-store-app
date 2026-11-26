@@ -1,9 +1,11 @@
 # Tire-Store-App Data Architecture & Database Engineering Specifications
 
-> **Status**: AUTHORITATIVE DATA ARCHITECTURE SPECIFICATION (Phase 2F-C)
-> **Scope**: 8 Microservices, Dedicated PostgreSQL Schemas, Redis Cart/Cache Data Models, RabbitMQ Contracts & Outbox Architecture
+> **Status**: AUTHORITATIVE DATA ARCHITECTURE SPECIFICATION (Phase 2F-C + Part 1 Foundations)
+> **Scope**: 8 Microservices, Dedicated Logical PostgreSQL Databases & Matching Schemas, Redis Cart/Cache Data Models, RabbitMQ Contracts (`tirestore.events`) & Outbox/Inbox Architecture
 > **Key Architectural Mandates**:
-> - Strictly 8 standalone microservice databases; zero shared tables or cross-database joins.
+> - Strictly 8 standalone microservice databases, each with **one logical PostgreSQL database and one matching named schema** (e.g., `automotive_operations`); zero shared tables or cross-database joins.
+> - Separate Flyway migration role (DDL on own schema only, explicit `schemas`/`defaultSchema`) and least-privilege runtime role (DML only, zero cross-service grants).
+> - Every producing/consuming service owns `<service_schema>.outbox_event` and `<service_schema>.consumer_inbox` inside its own schema.
 > - Database-per-service ownership, not database-per-physical-store.
 > - PostgreSQL is the authoritative system of record for all financial, commercial, and operational state.
 > - Redis is the primary store for active shopping carts and ephemeral performance caches.
@@ -38,3 +40,27 @@ Each standalone microservice owns an implementation-ready data specification det
 | **[`identity-access.md`](./services/identity-access.md)** | 8096 | PostgreSQL | `user_profiles`, `store_role_assignments`, `customer_garage_vehicles` |
 | **[`appointment.md`](./services/appointment.md)** | 8097 | PostgreSQL | `service_appointments`, `appointment_reschedule_logs`, `service_entitlements` |
 | **[`store-management.md`](./services/store-management.md)** | 8098 | PostgreSQL + PostGIS | `store_branches`, `store_operating_hours`, `service_bays`, `bay_schedule_entries` (GiST range) |
+
+---
+
+## 3. PostgreSQL Schema & Role Isolation Verification Recipe (`OPS-01` — `NOT RUN` in Part 1)
+
+When Phase 3 Flyway migrations are implemented, execute this repeatable verification against a fresh empty PostgreSQL instance:
+
+1. **Migration Role Execution**: Run Flyway for each service with `spring.flyway.schemas=<service_schema>` and `spring.flyway.default-schema=<service_schema>` using the dedicated `<service>_migrator` role (granted `CREATE` on `<service_schema>` only).
+2. **Object & Schema Inspection**:
+   ```sql
+   SELECT table_schema, table_name
+   FROM information_schema.tables
+   WHERE table_schema = '<service_schema>'
+   ORDER BY table_name;
+   ```
+   Confirm all domain tables, `outbox_event`, `consumer_inbox`, and `flyway_schema_history` reside strictly in `<service_schema>` (zero objects leaked into `public` or other schemas).
+3. **Runtime Least-Privilege & Cross-Service Denial**:
+   ```sql
+   -- Verify runtime role has DML only (no CREATE/DDL) and zero cross-service access:
+   SELECT has_schema_privilege('<service>_app', '<service_schema>', 'USAGE'),
+          has_schema_privilege('<service>_app', '<service_schema>', 'CREATE'),
+          has_schema_privilege('<service>_app', '<other_service_schema>', 'USAGE');
+   -- Expected: (true, false, false); cross-database/schema SELECT must fail with permission denied.
+   ```

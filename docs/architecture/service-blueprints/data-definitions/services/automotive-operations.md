@@ -3,7 +3,8 @@
 > **Service Identity**: `automotive-operations` (Port 8091)
 > **Status**: AUTHORITATIVE IMPLEMENTATION SPECIFICATION (Phase 2F-C)
 > **Primary Storage**: PostgreSQL (orders, line items, checkout sagas, work orders, quotes, outbox) + Redis (active carts)
-> **Database Schema**: `automotive_operations`
+> **Logical Database**: `automotive_operations_db` | **Database Schema**: `automotive_operations`
+> **Flyway & Role Ownership (`OPS-01`)**: `spring.flyway.schemas=automotive_operations`, `spring.flyway.default-schema=automotive_operations`; migration role `automotive_operations_migrator` (DDL on `automotive_operations` only), runtime role `automotive_operations_app` (DML only, zero cross-DB/schema grants).
 > **Owned Modules**: Cart & Checkout Module, Order & Commercial Fulfillment Module, Work Order & Workshop Execution Module
 
 ---
@@ -69,7 +70,7 @@ erDiagram
 
 ### 2.1 Table: `orders`
 ```sql
-CREATE TABLE orders (
+CREATE TABLE automotive_operations.orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_number VARCHAR(32) NOT NULL UNIQUE,
     customer_id UUID NOT NULL,
@@ -90,15 +91,15 @@ CREATE TABLE orders (
     ))
 );
 
-CREATE INDEX idx_orders_customer ON orders (customer_id, created_at DESC);
-CREATE INDEX idx_orders_store_status ON orders (store_id, status, created_at DESC);
+CREATE INDEX idx_orders_customer ON automotive_operations.orders (customer_id, created_at DESC);
+CREATE INDEX idx_orders_store_status ON automotive_operations.orders (store_id, status, created_at DESC);
 ```
 
 ### 2.2 Table: `order_items`
 ```sql
-CREATE TABLE service_entitlements (
+CREATE TABLE automotive_operations.service_entitlements (
     redemption_token VARCHAR(128) PRIMARY KEY,
-    order_item_id UUID NOT NULL REFERENCES order_items(id) ON DELETE RESTRICT,
+    order_item_id UUID NOT NULL REFERENCES automotive_operations.order_items(id) ON DELETE RESTRICT,
     customer_id UUID NOT NULL,
     service_item_id UUID NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'ISSUED',
@@ -114,11 +115,11 @@ CREATE TABLE service_entitlements (
     CONSTRAINT chk_entitlement_status CHECK (status IN ('ISSUED', 'REDEMPTION_PENDING', 'REDEEMED', 'EXPIRED', 'REFUNDED'))
 );
 
-CREATE INDEX idx_entitlement_customer ON service_entitlements (customer_id, status);
+CREATE INDEX idx_entitlement_customer ON automotive_operations.service_entitlements (customer_id, status);
 
-CREATE TABLE order_items (
+CREATE TABLE automotive_operations.order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
     sellable_item_id UUID NOT NULL,
     item_type VARCHAR(16) NOT NULL CHECK (item_type IN ('PRODUCT', 'SERVICE')),
     sku_code VARCHAR(64) NOT NULL,
@@ -132,12 +133,12 @@ CREATE TABLE order_items (
     ))
 );
 
-CREATE INDEX idx_order_items_order ON order_items (order_id);
+CREATE INDEX idx_order_items_order ON automotive_operations.order_items (order_id);
 ```
 
 ### 2.2B Table: `checkout_attempt`
 ```sql
-CREATE TABLE checkout_attempt (
+CREATE TABLE automotive_operations.checkout_attempt (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     cart_id UUID NOT NULL,
     cart_version INTEGER NOT NULL,
@@ -158,24 +159,24 @@ CREATE TABLE checkout_attempt (
 
 -- Durable Idempotency Across Lifecycle: Preserves idempotent deduplication across both active and terminal attempts
 CREATE UNIQUE INDEX idx_uk_checkout_idempotency_global
-ON checkout_attempt (customer_id, idempotency_key);
+ON automotive_operations.checkout_attempt (customer_id, idempotency_key);
 
 -- Lifecycle-Wide Nonterminal Uniqueness: Prevents duplicate active attempts for the same customer cart partition
 CREATE UNIQUE INDEX idx_uk_active_checkout_partition
-ON checkout_attempt (customer_id, cart_id, store_id)
+ON automotive_operations.checkout_attempt (customer_id, cart_id, store_id)
 WHERE status IN ('INITIATED', 'HOLDS_ACQUIRED', 'PAYMENT_PENDING', 'AUTHORIZED');
 
 -- Strict 1:1 mapping between external payment intent and checkout attempt
 CREATE UNIQUE INDEX idx_uk_payment_intent_active
-ON checkout_attempt (payment_intent_id)
+ON automotive_operations.checkout_attempt (payment_intent_id)
 WHERE payment_intent_id IS NOT NULL;
 ```
 
 ### 2.3 Table: `checkout_saga_instance`
 ```sql
-CREATE TABLE checkout_saga_instance (
+CREATE TABLE automotive_operations.checkout_saga_instance (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL UNIQUE REFERENCES orders(id),
+    order_id UUID NOT NULL UNIQUE REFERENCES automotive_operations.orders(id),
     current_step VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL,
     idempotency_key UUID NOT NULL UNIQUE,
@@ -188,16 +189,16 @@ CREATE TABLE checkout_saga_instance (
     CONSTRAINT chk_saga_status CHECK (status IN ('IN_PROGRESS', 'COMPLETED', 'FAILED', 'COMPENSATING', 'COMPENSATED'))
 );
 
-CREATE INDEX idx_saga_recovery ON checkout_saga_instance (status, updated_at)
+CREATE INDEX idx_saga_recovery ON automotive_operations.checkout_saga_instance (status, updated_at)
 WHERE status IN ('IN_PROGRESS', 'COMPENSATING');
 ```
 
 ### 2.4 Table: `work_orders` & `work_order_tasks`
 ```sql
-CREATE TABLE work_orders (
+CREATE TABLE automotive_operations.work_orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ticket_number VARCHAR(32) NOT NULL UNIQUE,
-    order_id UUID NULL REFERENCES orders(id),
+    order_id UUID NULL REFERENCES automotive_operations.orders(id),
     appointment_id UUID NULL,
     store_id UUID NOT NULL,
     vehicle_vin CHAR(17) NOT NULL,
@@ -214,12 +215,12 @@ CREATE TABLE work_orders (
     ))
 );
 
-CREATE INDEX idx_work_orders_store_status ON work_orders (store_id, status);
-CREATE INDEX idx_work_orders_vin ON work_orders (vehicle_vin);
+CREATE INDEX idx_work_orders_store_status ON automotive_operations.work_orders (store_id, status);
+CREATE INDEX idx_work_orders_vin ON automotive_operations.work_orders (vehicle_vin);
 
-CREATE TABLE work_order_tasks (
+CREATE TABLE automotive_operations.work_order_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    work_order_id UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+    work_order_id UUID NOT NULL REFERENCES automotive_operations.work_orders(id) ON DELETE CASCADE,
     service_item_id UUID NOT NULL,
     task_name VARCHAR(128) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
@@ -232,9 +233,9 @@ CREATE TABLE work_order_tasks (
 
 ### 2.5 Table: `supplemental_quotes`
 ```sql
-CREATE TABLE supplemental_quotes (
+CREATE TABLE automotive_operations.supplemental_quotes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    work_order_id UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+    work_order_id UUID NOT NULL REFERENCES automotive_operations.work_orders(id) ON DELETE CASCADE,
     revision_number INTEGER NOT NULL DEFAULT 1,
     status VARCHAR(32) NOT NULL DEFAULT 'PENDING_CUSTOMER_APPROVAL',
     additional_labor_cents INTEGER NOT NULL DEFAULT 0,
@@ -248,7 +249,7 @@ CREATE TABLE supplemental_quotes (
     CONSTRAINT chk_quote_status CHECK (status IN ('PENDING_CUSTOMER_APPROVAL', 'APPROVED', 'REJECTED', 'SUPERSEDED'))
 );
 
-CREATE UNIQUE INDEX idx_work_order_quote_rev ON supplemental_quotes (work_order_id, revision_number);
+CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplemental_quotes (work_order_id, revision_number);
 ```
 
 ---
@@ -307,3 +308,10 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON supplemental_quotes (work_order_
    `BEGIN` $	o$ Insert `orders` (status `PENDING_PAYMENT`) $	o$ Insert `order_items` (snapshot prices) $	o$ Insert `checkout_saga_instance` $	o$ Insert `outbox_event` $	o$ `COMMIT`. Remote HTTP calls to reserve stock and bays occur **outside** this SQL transaction.
 2. **Supplemental Quote Approval (`ACT-OPS-022`)**:
    `BEGIN` $	o$ `SELECT * FROM supplemental_quotes WHERE id = :id FOR UPDATE` $	o$ Update quote status to `APPROVED` $	o$ Insert new `work_order_tasks` for authorized labor/parts $	o$ Insert `outbox_event` $	o$ `COMMIT`.
+
+---
+
+## Local Outbox & Consumer Inbox Tables (`automotive_operations`)
+- **Messaging Role**: **Producer & Consumer**
+- **Service-Owned Flyway Instantiation**: Instantiates both `automotive_operations.outbox_event` (produces `OrderConfirmedEvent`, `OrderCancelledEvent`, `QuoteApprovedEvent`, `WorkOrderCompletedEvent`) and `automotive_operations.consumer_inbox` (consumes `ProductPriceChangedEvent`, `StockAllocationConfirmedEvent`) via `backend/services/automotive-operations/src/main/resources/db/migration/V*.sql`.
+- **Canonical Schema Reference**: Follow the exact `outbox_event` / `consumer_inbox` DDL, T1/T2/T3 boundaries, and retry rules in [`../events-and-projections.md`](../events-and-projections.md) (no shared cross-service tables; DDL is instantiated in `automotive_operations` within `automotive_operations_db`).

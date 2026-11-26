@@ -43,7 +43,7 @@ To prevent architectural ambiguity, every numerical threshold in the platform is
 | **Active Cart Inactivity TTL (Auth)**    | `automotive-operations` |         7 days         | **OPEN-POLICY** | TTL refreshed on every cart mutation for authenticated accounts.                                        |
 | **Active Cart Inactivity TTL (Guest)**   | `automotive-operations` |        48 hours        | **OPEN-POLICY** | TTL for anonymous guest sessions.                                                                       |
 | **Redis Persistence Configuration**      | `automotive-operations` | `appendfsync everysec` | **OPEN-POLICY** | Trade-off: prospective $\le 1\text{s}$ cart data loss during host power failure vs write latency.       |
-| **Outbox Relay Polling Interval**        | All Services            |         500 ms         | **OPEN-POLICY** | Balance between event delivery freshness and database CPU polling overhead.                             |
+| **Outbox Relay Polling Interval**        | All Services            |         500 ms         | **PART-1-DEFAULT** | Initial polling default (`P1-DEC-03`); batch limit 50, 60s lease, 10s confirm timeout, max 12 claims before `BLOCKED`. Does not guarantee delivery latency. |
 | **Saga Crash Recovery Timeout**          | `automotive-operations` |       5 minutes        | **OPEN-POLICY** | Grace period before `CheckoutSagaRecoveryJob` evaluates stuck saga instances.                           |
 | **Notification Max Retry Attempts**      | `notification`          |       3 attempts       | **OPEN-POLICY** | Exponential backoff (1s, 5s, 30s) before routing to dead-letter queue.                                  |
 | **Target Scale Baseline**                | All Services            |      15–50 stores      |   **TARGET**    | Planning baseline: 10–25 bays/store, 100k+ tire/part SKUs.                                              |
@@ -89,6 +89,20 @@ These owner-approved architectural directions govern Parts 1–12 remediation. *
 
 To preserve `ADR-01`..`ADR-18` without silent rewrites while preventing false closure (`GOV-01`, `GOV-04`):
 - **Numeric Values in Section 2 (`OPEN-POLICY`)**: Stock hold (`15 minutes`), bay hold (`15 minutes`), VIN deposit hold (`72 hours` / `$500.00 USD`), cart TTLs (`7 days` / `48 hours`), Redis `appendfsync everysec`, outbox polling (`500 ms`), Saga recovery (`5 minutes`), notification retries (`3 attempts`), and retention/RPO/RTO targets are **not finalized** in Part 0. Each is routed to its respective Part (Parts 3, 4, 5, 6, 9, 10, 11) for explicit owner approval.
-- **`ADR-06` (Outbox 500 ms)**: The Transactional Outbox *pattern* is approved (`COR-DIR-02`), while the `500 ms` polling interval and outbox table/retention contradictions remain `OPEN-POLICY` routed to **Part 1** (`MSG-05`, `MSG-06`).
+- **`ADR-06` (Outbox 500 ms)**: The Transactional Outbox *pattern* and Part 1 operational defaults (`500 ms` poll, batch 50, 60s lease, 10s confirm timeout, 12 max claims, 7-day `PUBLISHED` retention, `tirestore.events` exchange, `(consumer_name, event_id)` inbox) are finalized in **Section 4 (`P1-DEC-01`–`P1-DEC-05`)**. Legal data-retention policies remain for **Part 11** (`OPS-06`).
 - **`ADR-18` (HikariCP 10–20)**: Connection pool sizing (`10–20`) is flagged as an unverified capacity assumption routed to **Part 11** (`OPS-04`).
 - **`ADR-01` (YMMT Authority)**: Generic YMMT in `automotive-product` is recorded in `COR-DIR-03`, while schema/contract completeness is routed to **Part 2** (`INV-19`, `DOC-05`).
+
+---
+
+## 4. Part 1 Finalized Decisions — Database & Event-Processing Foundations (Approved 2026-11-25)
+
+> **Approval Authority**: Owner-approved on 2026-11-25 (`Tire_Store_Part_1_AGY_Instructions.md`). Resolves `MSG-02`–`MSG-07` and `OPS-01` at design specification level (executable Flyway/Testcontainers verification required in Phase 3).
+
+| Decision ID | Status | Finalized Part 1 Contract | Authority & Impacted Scope |
+| :--- | :--- | :--- | :--- |
+| **P1-DEC-01** | `APPROVED` | Each of the 8 services owns one logical PostgreSQL database and matching named schema; separate Flyway migration role (DDL on own schema only, explicit `schemas`/`defaultSchema`) and runtime role (DML only, zero cross-service grants). | Owner approval 2026-11-25; resolves `OPS-01`. |
+| **P1-DEC-02** | `APPROVED` | One durable RabbitMQ topic exchange `tirestore.events` with durable queues, persistent messages (`delivery_mode=2`), publisher confirms, and `mandatory` routing (`basic.return` tracked as failure). | Owner approval 2026-11-25; resolves `MSG-04`. |
+| **P1-DEC-03** | `APPROVED` | Per-producing-service `<schema>.outbox_event` (singular) with states `PENDING`, `CLAIMED`, `PUBLISHED`, `BLOCKED`. Operational defaults: 500 ms poll, batch 50, 60s lease, 10s confirm timeout, 12 max claims, capped 5m jittered backoff, 7-day `PUBLISHED` retention. | Owner approval 2026-11-25; resolves `MSG-05`, `MSG-06`, `MSG-07`; updates `ADR-06`. |
+| **P1-DEC-04** | `APPROVED` | Per-consuming-service `<schema>.consumer_inbox` keyed by `(consumer_name, event_id)`. Atomic `INSERT ... ON CONFLICT DO NOTHING` + local DB mutation in one SQL transaction; manual RabbitMQ ACK only after commit; no external email/SMS/payment calls inside SQL transaction. | Owner approval 2026-11-25; resolves `MSG-02`, `MSG-03`. |
+| **P1-DEC-05** | `APPROVED` | At-least-once RabbitMQ delivery; retries preserve immutable `event_id`, `aggregate_version`, `payload`, and occurrence `timestamp`. Consumers check `aggregate_version` (Part 10 handles full projection repair); 5 total broker delivery attempts (1 + 4 delayed) before quarantine DLQ with alert. | Owner approval 2026-11-25; resolves `MSG-02`, `MSG-07`. |

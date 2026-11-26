@@ -33,7 +33,7 @@ Prefer package-by-feature, with `api/`, `application/`, `domain/`, `infrastructu
 - OpenAPI contract per service; generated TypeScript client for web/mobile; standard validation, pagination, errors (Problem Details where appropriate), dates/timezones, IDs and versioning.
 - Versioned event schema with event ID, source, type, schema version, timestamp, correlation ID and payload.
 - REST calls: deadline/timeout, authorization, bounded/safe retries, error translation and traces.
-- RabbitMQ: transactional outbox for reliable publication, idempotent consumers, DLQ/retry controls; never assume exactly-once delivery.
+- RabbitMQ: durable topic exchange `tirestore.events`, transactional outbox (`<schema>.outbox_event`) with publisher confirms and `mandatory` routing, idempotent consumers (`<schema>.consumer_inbox` keyed by `(consumer_name, event_id)`), manual ACK only after local SQL commit, 5 total broker delivery attempts before quarantine DLQ; never assume exactly-once delivery.
 - Cross-service workflows: documented orchestration, timeout policy, hold expiry and compensations. No distributed SQL transactions by default.
 
 ## Security
@@ -43,7 +43,7 @@ Prefer package-by-feature, with `api/`, `application/`, `domain/`, `infrastructu
 - Internal calls authenticated; TLS, least-privilege DB accounts, secrets out of source control, secure audit logs and no raw payment-card storage.
 
 ## Persistence
-Each service owns its PostgreSQL database/migrations. Flyway is authoritative; do not enable automatic schema mutation in production. Use constraints and locking/atomic operations for inventory and exclusive resource holds. Do not use Redis as a source of truth.
+Each service owns **one logical PostgreSQL database and one matching named schema**, with explicit Flyway `schemas`/`defaultSchema` configuration and qualified DDL. Separate migration roles (DDL on own schema only) from least-privilege runtime roles (DML only, zero cross-service grants). Do not enable automatic schema mutation in production. Use constraints and locking/atomic operations for inventory and exclusive resource holds. Do not use Redis as a source of truth.
 
 ## Observability, testing and quality
 Actuator probes; consistent structured logs and trace propagation across HTTP/messages; Micrometer and OpenTelemetry. Unit, controller, PostgreSQL/RabbitMQ Testcontainers integration, authorization, contract and cross-service workflow tests. Include concurrent booking/stock scenarios, idempotency and partial failures. Enforce dependency direction/package access via ArchUnit. Do not claim a test passed unless executed and observed.

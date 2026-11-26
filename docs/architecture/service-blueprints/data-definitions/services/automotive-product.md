@@ -3,7 +3,8 @@
 > **Service Identity**: `automotive-product` (Port 8092)
 > **Status**: AUTHORITATIVE IMPLEMENTATION SPECIFICATION (Phase 2F-C)
 > **Primary Storage**: PostgreSQL (catalog, specifications, branch inventory, stock reservations, movements, outbox)
-> **Database Schema**: `automotive_product`
+> **Logical Database**: `automotive_product_db` | **Database Schema**: `automotive_product`
+> **Flyway & Role Ownership (`OPS-01`)**: `spring.flyway.schemas=automotive_product`, `spring.flyway.default-schema=automotive_product`; migration role `automotive_product_migrator` (DDL on `automotive_product` only), runtime role `automotive_product_app` (DML only, zero cross-DB/schema grants).
 > **Owned Modules**: Catalog & Services Module, Vehicle Fitment Module, Branch Inventory & Stock Allocation Module
 
 ---
@@ -64,7 +65,7 @@ erDiagram
 
 ### 2.1 Table: `product_skus` & `tire_specifications`
 ```sql
-CREATE TABLE product_skus (
+CREATE TABLE automotive_product.product_skus (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     sku_code VARCHAR(64) NOT NULL UNIQUE,
     brand VARCHAR(64) NOT NULL,
@@ -76,8 +77,8 @@ CREATE TABLE product_skus (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE tire_specifications (
-    sku_id UUID PRIMARY KEY REFERENCES product_skus(id) ON DELETE CASCADE,
+CREATE TABLE automotive_product.tire_specifications (
+    sku_id UUID PRIMARY KEY REFERENCES automotive_product.product_skus(id) ON DELETE CASCADE,
     section_width INTEGER NOT NULL CHECK (section_width BETWEEN 125 AND 355),
     aspect_ratio INTEGER NOT NULL CHECK (aspect_ratio BETWEEN 25 AND 85),
     rim_diameter INTEGER NOT NULL CHECK (rim_diameter BETWEEN 12 AND 26),
@@ -90,16 +91,16 @@ CREATE TABLE tire_specifications (
     ) STORED
 );
 
-CREATE INDEX idx_tire_dimension ON tire_specifications (dimension_string);
-CREATE INDEX idx_tire_specs_filter ON tire_specifications (section_width, aspect_ratio, rim_diameter);
+CREATE INDEX idx_tire_dimension ON automotive_product.tire_specifications (dimension_string);
+CREATE INDEX idx_tire_specs_filter ON automotive_product.tire_specifications (section_width, aspect_ratio, rim_diameter);
 ```
 
 ### 2.2 Table: `store_inventory`
 ```sql
-CREATE TABLE store_inventory (
+CREATE TABLE automotive_product.store_inventory (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL,
-    sku_id UUID NOT NULL REFERENCES product_skus(id),
+    sku_id UUID NOT NULL REFERENCES automotive_product.product_skus(id),
     quantity_on_hand INTEGER NOT NULL DEFAULT 0 CHECK (quantity_on_hand >= 0),
     quantity_reserved INTEGER NOT NULL DEFAULT 0 CHECK (quantity_reserved >= 0),
     quantity_allocated INTEGER NOT NULL DEFAULT 0 CHECK (quantity_allocated >= 0),
@@ -111,15 +112,15 @@ CREATE TABLE store_inventory (
     )
 );
 
-CREATE INDEX idx_inventory_store_sku ON store_inventory (store_id, sku_id);
+CREATE INDEX idx_inventory_store_sku ON automotive_product.store_inventory (store_id, sku_id);
 ```
 
 ### 2.3 Table: `stock_reservations`
 ```sql
-CREATE TABLE stock_reservations (
+CREATE TABLE automotive_product.stock_reservations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL,
-    sku_id UUID NOT NULL REFERENCES product_skus(id),
+    sku_id UUID NOT NULL REFERENCES automotive_product.product_skus(id),
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     status VARCHAR(32) NOT NULL DEFAULT 'HELD',
     order_id UUID NOT NULL,
@@ -134,17 +135,17 @@ CREATE TABLE stock_reservations (
     ))
 );
 
-CREATE INDEX idx_reservations_janitor ON stock_reservations (expires_at)
+CREATE INDEX idx_reservations_janitor ON automotive_product.stock_reservations (expires_at)
 WHERE status = 'HELD';
-CREATE INDEX idx_reservations_order ON stock_reservations (order_id);
+CREATE INDEX idx_reservations_order ON automotive_product.stock_reservations (order_id);
 ```
 
 ### 2.4 Table: `stock_movements` (Partitioned Ledger)
 ```sql
-CREATE TABLE stock_movements (
+CREATE TABLE automotive_product.stock_movements (
     id UUID DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL,
-    sku_id UUID NOT NULL REFERENCES product_skus(id),
+    sku_id UUID NOT NULL REFERENCES automotive_product.product_skus(id),
     movement_type VARCHAR(32) NOT NULL,
     quantity INTEGER NOT NULL,
     reference_id VARCHAR(64) NOT NULL,
@@ -157,10 +158,10 @@ CREATE TABLE stock_movements (
 ) PARTITION BY RANGE (created_at);
 
 -- Example Partition
-CREATE TABLE stock_movements_2026 PARTITION OF stock_movements
+CREATE TABLE automotive_product.stock_movements_2026 PARTITION OF automotive_product.stock_movements
 FOR VALUES FROM ('2026-01-01 00:00:00Z') TO ('2027-01-01 00:00:00Z');
 
-CREATE INDEX idx_movements_sku_store ON stock_movements (store_id, sku_id, created_at DESC);
+CREATE INDEX idx_movements_sku_store ON automotive_product.stock_movements (store_id, sku_id, created_at DESC);
 ```
 
 ---
@@ -168,7 +169,7 @@ CREATE INDEX idx_movements_sku_store ON stock_movements (store_id, sku_id, creat
 ### 2.5 Table: `inventory_quarantine_stock` & `quarantine_disposition_log`
 ```sql
 -- Separate Quarantine Inventory: Physical isolation from sellable stock (quantity_on_hand)
-CREATE TABLE inventory_quarantine_stock (
+CREATE TABLE automotive_product.inventory_quarantine_stock (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL,
     sku_id UUID NOT NULL,
@@ -191,11 +192,11 @@ CREATE TABLE inventory_quarantine_stock (
     ))
 );
 
-CREATE INDEX idx_quarantine_store_status ON inventory_quarantine_stock (store_id, status);
+CREATE INDEX idx_quarantine_store_status ON automotive_product.inventory_quarantine_stock (store_id, status);
 
-CREATE TABLE quarantine_disposition_log (
+CREATE TABLE automotive_product.quarantine_disposition_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    quarantine_stock_id UUID NOT NULL REFERENCES inventory_quarantine_stock(id) ON DELETE RESTRICT,
+    quarantine_stock_id UUID NOT NULL REFERENCES automotive_product.inventory_quarantine_stock(id) ON DELETE RESTRICT,
     disposition_outcome VARCHAR(32) NOT NULL,
     inspected_by UUID NOT NULL,
     inspection_findings JSONB NOT NULL,
@@ -213,19 +214,19 @@ CREATE TABLE quarantine_disposition_log (
 ```sql
 -- Executed inside a single local ACID transaction during ACT-PRD-008
 -- Step 1: Idempotency check
-SELECT id, status, expires_at FROM stock_reservations
+SELECT id, status, expires_at FROM automotive_product.stock_reservations
 WHERE order_id = :order_id AND sku_id = :sku_id AND idempotency_key = :idempotency_key;
 
 -- Step 2: For multi-SKU requests, rows are locked in deterministic sorted order (ORDER BY sku_id ASC)
 -- to completely eliminate deadlock cycles across competing concurrent checkout sessions:
-SELECT id FROM store_inventory
+SELECT id FROM automotive_product.store_inventory
 WHERE store_id = :store_id AND sku_id IN (:sorted_sku_ids)
 ORDER BY sku_id ASC
 FOR UPDATE;
 
 -- Step 3: Atomic conditional reservation update
 WITH reserved_stock AS (
-    UPDATE store_inventory
+    UPDATE automotive_product.store_inventory
     SET quantity_reserved = quantity_reserved + :req_qty,
         version = version + 1,
         updated_at = NOW()
@@ -234,7 +235,7 @@ WITH reserved_stock AS (
       AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty
     RETURNING store_id, sku_id, quantity_on_hand, quantity_reserved, quantity_allocated
 )
-INSERT INTO stock_reservations (store_id, sku_id, quantity, status, order_id, idempotency_key, expires_at)
+INSERT INTO automotive_product.stock_reservations (store_id, sku_id, quantity, status, order_id, idempotency_key, expires_at)
 SELECT store_id, sku_id, :req_qty, 'HELD', :order_id, :idempotency_key, NOW() + INTERVAL '15 minutes'
 FROM reserved_stock
 RETURNING id, status, expires_at;
@@ -252,18 +253,25 @@ RETURNING id, status, expires_at;
 ```sql
 -- Executed when tires physically leave the shop via customer pickup or installation
 BEGIN;
-  UPDATE store_inventory
+  UPDATE automotive_product.store_inventory
   SET quantity_allocated = quantity_allocated - :qty,
       quantity_on_hand = quantity_on_hand - :qty,
       version = version + 1,
       updated_at = NOW()
   WHERE store_id = :store_id AND sku_id = :sku_id AND quantity_allocated >= :qty AND quantity_on_hand >= :qty;
 
-  UPDATE stock_reservations
+  UPDATE automotive_product.stock_reservations
   SET status = 'FULFILLED', updated_at = NOW()
   WHERE order_id = :order_id AND sku_id = :sku_id AND status = 'CONFIRMED';
 
-  INSERT INTO stock_movements (store_id, sku_id, movement_type, quantity, reference_id)
+  INSERT INTO automotive_product.stock_movements (store_id, sku_id, movement_type, quantity, reference_id)
   VALUES (:store_id, :sku_id, :movement_type, :qty, :order_number);
 COMMIT;
 ```
+
+---
+
+## Local Outbox & Consumer Inbox Tables (`automotive_product`)
+- **Messaging Role**: **Producer & Consumer**
+- **Service-Owned Flyway Instantiation**: Instantiates both `automotive_product.outbox_event` (produces `ProductPriceChangedEvent`, `StockAllocationConfirmedEvent`, `ServiceDefinitionChangedEvent`, `StockLowReorderEvent`) and `automotive_product.consumer_inbox` (consumes `OrderCancelledEvent`, `WorkOrderCompletedEvent`) via `backend/services/automotive-product/src/main/resources/db/migration/V*.sql`.
+- **Canonical Schema Reference**: Follow the exact `outbox_event` / `consumer_inbox` DDL, T1/T2/T3 boundaries, and retry rules in [`../events-and-projections.md`](../events-and-projections.md) (no shared cross-service tables; DDL is instantiated in `automotive_product` within `automotive_product_db`).

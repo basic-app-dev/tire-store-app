@@ -28,9 +28,9 @@ notification (Port 8095)
 - **ACT-NOT-003**: Dispatch Transactional SMS Notification (`POST /api/v1/notifications/sms`) | Twilio / Telnyx adapter | SLO: < 200 ms.
 - **ACT-NOT-004**: Dispatch Transactional Email Notification (`POST /api/v1/notifications/email`) | SendGrid / AWS SES adapter | SLO: < 250 ms.
 - **ACT-NOT-005**: Dispatch Mobile Push Notification (`POST /api/v1/notifications/push`) | Firebase FCM / Apple APNs | SLO: < 180 ms.
-- **ACT-NOT-006**: Consume Domain Event from Message Broker (`@RabbitListener`) | Consumer engine | Queue age < 5s.
+- **ACT-NOT-006**: Consume Domain Event from Message Broker (`@RabbitListener`) | Claims `notification.consumer_inbox` `(consumer_name, event_id)` inside local SQL TX; manual ACK only after commit; 5 total broker delivery attempts (1 + 4 delayed) before quarantine DLQ.
 - **ACT-NOT-007**: Ingest Delivery Status Webhook from Carrier (`POST /api/v1/notifications/carrier-webhook`) | Carrier callback | SLO: < 60 ms.
-- **ACT-NOT-008**: Execute Dead-Letter Queue (DLQ) Retry (`NO HTTP ENDPOINT`) | `NotificationRetryWorker` with exponential backoff | Max 3 retries.
+- **ACT-NOT-008**: Execute Dead-Letter Queue (DLQ) Retry (`NO HTTP ENDPOINT`) | `NotificationRetryWorker` with exponential backoff (broker DLQ quarantine/replay per `P1-DEC-05`; provider delivery retry counts finalized in Part 10).
 
 ---
 

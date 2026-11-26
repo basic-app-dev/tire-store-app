@@ -19,7 +19,7 @@
 | **Work Orders & Inspection Logs**| PostgreSQL | None | 7 Years | Indexed historical vehicle service record |
 | **Vehicle Sales Contracts** | S3 / PostgreSQL | None | 10 Years (DMV/State) | Cryptographic immutable PDF storage in S3 bucket |
 | **Notification Delivery Logs** | PostgreSQL | None | 365 Days | Monthly partition drop for records > 1 year |
-| **Outbox Events (Published)** | PostgreSQL | Immediate on ack | 7 Days (Audit) | Daily cleanup job deletes rows where `published_at < NOW() - 7d` |
+| **Outbox Events (Published)** | PostgreSQL | Retained 7 days post-publish | 7 Days (Operational Default) | Daily cleanup job deletes only `status = 'PUBLISHED'` rows where `published_at < clock_timestamp() - INTERVAL '7 days'`; `PENDING`/`CLAIMED`/`BLOCKED` are never auto-purged (legal retention reviewed in Part 11). |
 
 ---
 
