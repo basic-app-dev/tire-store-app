@@ -11,11 +11,11 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **Guest Shopping Carts** | Redis | 48 hours inactivity | None | Native Redis TTL expiration |
 | **User Shopping Carts** | Redis | 7 days inactivity | None | Native Redis TTL expiration |
-| **Stock Reservations (Holds)**| PostgreSQL | 15 minutes | 24 hours | `ReservationJanitorJob` marks EXPIRED; purged after 24h |
-| **Bay Reservations (Holds)** | PostgreSQL | 15 minutes | 24 hours | `BayReservationJanitorJob` marks RELEASED; purged after 24h |
+| **Stock Reservations (Holds)**| PostgreSQL | 10 minutes (`P3-DEC-07`) | 24 hours | `ReservationJanitorJob` marks EXPIRED; purged after 24h |
+| **Bay Reservations (Holds)** | PostgreSQL | 15 minutes *(pending Part 5/6 alignment)* | 24 hours | `BayReservationJanitorJob` marks RELEASED; purged after 24h |
 | **VIN Deposit Sales Holds** | PostgreSQL | 72 hours | 30 days | `VinHoldJanitorJob` releases hold; retained for deal history |
 | **Commercial Orders & Invoices**| PostgreSQL | None | 7 Years (Legal) | Cold partition storage after 2 years; read-only |
-| **Stock Movement Ledger** | PostgreSQL | None | 7 Years (Tax/Audit) | PostgreSQL Date-Range Partitioning (Annual tables) |
+| **Inventory Operation Audit** | PostgreSQL | None | Operational Audit (`DEFERRED_BY_OWNER_V1` for 7y partitioned ledger) | Unpartitioned `inventory_operation` (`P3-DEC-05`); legal compliance retention deferred to Part 11 |
 | **Work Orders & Inspection Logs**| PostgreSQL | None | 7 Years | Indexed historical vehicle service record |
 | **Vehicle Sales Contracts** | S3 / PostgreSQL | None | 10 Years (DMV/State) | Cryptographic immutable PDF storage in S3 bucket |
 | **Notification Delivery Logs** | PostgreSQL | None | 365 Days | Monthly partition drop for records > 1 year |

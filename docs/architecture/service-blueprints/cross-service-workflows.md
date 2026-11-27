@@ -19,7 +19,7 @@ Master Business Workflows
   ├── WF-06: Standalone Service Appointment Booking
   ├── WF-07: Unscheduled Service Entitlement (SCHEDULE_LATER) Redemption
   ├── WF-08: Workshop Execution, Inspection & Supplemental Quote Approval
-  ├── WF-09: Physical Inventory Restocking, Transfers & Damage Adjustments
+  ├── WF-09: Physical Inventory Restocking & Guarded Adjustments (Transfers/Quarantine DEFERRED_BY_OWNER_V1)
   ├── WF-10: Used-Vehicle Sales Inquiry, Deposit & Digital Contract Execution
   ├── WF-11: Distributed Saga Failure Recovery & Crash Janitor
   └── WF-12: Transactional Outbox Event Dispatch & Dead-Letter Processing
@@ -83,13 +83,13 @@ sequenceDiagram
     participant Stripe as Stripe API
     participant Notif as notification (:8095)
 
-    Customer->>Ops: POST /checkout/sessions (Cart ID, Store #101, Bay Slot)
-    Note over Ops: 1. Create Order (PENDING_PAYMENT)<br/>Persist Saga State (STEP_1_HOLD_STOCK)
-    Ops->>Prod: POST /inventory/reservations (SKU, Qty: 4, Store #101)
-    Prod-->>Ops: 201 Created (Reservation #R101, TTL: 15m)
-    Note over Ops: Persist Saga State (STEP_2_HOLD_BAY)
+    Customer->>Ops: POST /checkout/sessions (Enter Checkout: Cart ID, Store #101)
+    Note over Ops: 1. Persist checkout_attempt (expires_at = +10m)<br/>Snapshot Order & Saga State
+    Ops->>Prod: POST /inventory/reservations (Group physical lines, Qty: 4, Store #101)
+    Prod-->>Ops: 201 Created (ReservationGroup #G101, TTL: 10m)
+    Note over Ops: Customer clicks Place Order/Pay (Part 5/6 align bay & payment deadline)
     Ops->>Store: POST /bays/reservations (Store #101, Bay #2, Slot)
-    Store-->>Ops: 201 Created (BayHold #B101, TTL: 15m)
+    Store-->>Ops: 201 Created (BayHold #B101, aligned deadline pending Part 5/6)
     Note over Ops: Persist Saga State (STEP_3_PAYMENT)
     Ops->>Stripe: Confirm Payment Intent (Idempotency-Key)
     Stripe-->>Ops: 200 OK (Payment Succeeded)
@@ -110,13 +110,13 @@ sequenceDiagram
 ```
 
 #### Failure Compensations in WF-04:
-- **Case A: Inventory Hold Fails**: Saga immediately terminates; Order marked `FAILED_OUT_OF_STOCK`. No downstream holds attempted.
-- **Case B: Bay Hold Fails**: Saga invokes compensation: `DELETE /reservations/R101` on `automotive-product`. Stock hold released. Order marked `FAILED_BAY_UNAVAILABLE`.
+- **Case A: Inventory Hold Fails**: Checkout entry immediately returns `409 INSUFFICIENT_STOCK` with per-line diagnostics; no downstream holds attempted.
+- **Case B: Bay Hold Fails**: Saga invokes compensation: `DELETE /reservations/G101` on `automotive-product`. Stock hold released. Order marked `FAILED_BAY_UNAVAILABLE`.
 - **Case C: Payment Fails / Card Declined**: Saga invokes compensations:
   1. `DELETE /bays/reservations/B101` on `store-management`.
-  2. `DELETE /reservations/R101` on `automotive-product`.
+  2. `DELETE /reservations/G101` on `automotive-product`.
   3. Order marked `PAYMENT_DECLINED`.
-- **Case D: Crash After Payment Capture**: On orchestrator restart, `CheckoutSagaRecoveryJob` detects `STEP_3_PAYMENT` completed. It idempotently re-executes confirmation calls forward using preserved reservation IDs.
+- **Case D: Crash After Payment Capture**: On orchestrator restart, `CheckoutSagaRecoveryJob` detects `STEP_3_PAYMENT` completed. It idempotently re-executes confirmation calls forward using preserved reservation group IDs.
 
 ---
 

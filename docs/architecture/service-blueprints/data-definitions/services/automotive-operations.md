@@ -126,9 +126,17 @@ CREATE TABLE automotive_operations.order_items (
     sku_code VARCHAR(64) NULL,     -- Populated for PHYSICAL_PRODUCT snapshot only
     description VARCHAR(255) NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
+    fulfilled_quantity INTEGER NOT NULL DEFAULT 0 CHECK (fulfilled_quantity >= 0),
+    shipped_quantity INTEGER NOT NULL DEFAULT 0 CHECK (shipped_quantity >= 0),
+    delivered_quantity INTEGER NOT NULL DEFAULT 0 CHECK (delivered_quantity >= 0), -- shipped != delivered (P3-DEC-02)
+    cancelled_quantity INTEGER NOT NULL DEFAULT 0 CHECK (cancelled_quantity >= 0),
     unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents >= 0),
     total_price_cents INTEGER NOT NULL CHECK (total_price_cents >= 0),
     booking_status VARCHAR(32) NOT NULL DEFAULT 'NOT_APPLICABLE',
+    CONSTRAINT chk_order_item_fulfillment_bounds CHECK (
+        fulfilled_quantity + cancelled_quantity <= quantity
+        AND delivered_quantity <= shipped_quantity
+    ),
     CONSTRAINT chk_item_typed_reference CHECK (
         (item_type = 'PHYSICAL_PRODUCT' AND physical_product_id IS NOT NULL AND service_id IS NULL)
         OR

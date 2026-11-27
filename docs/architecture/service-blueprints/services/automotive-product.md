@@ -32,16 +32,17 @@ automotive-product (Port 8092)
 4. `service` (PostgreSQL): `id`, `service_code` (distinct IDs per package, e.g. `INSTALL_1_WHEEL`, `INSTALL_2_WHEELS`, `INSTALL_4_WHEELS`), `name`, `wheel_count`, `estimated_duration_minutes`, `required_capability_code` (no default service price).
 5. `store_service_price` (PostgreSQL): `(store_id, service_id)`, `price_cents` (store-specific USD service price; absent row = not sellable at that store; no default service price or fallback override; `store-management` owns facility capability).
 6. `vehicle_configuration` & Category Fitment Evidence (PostgreSQL): Normalized YMMT + `tire_fitment_evidence`, `wiper_fitment_evidence`, `wheel_fitment_evidence`, `brake_fitment_evidence` with provenance (`source_provider`, `evidence_version`, `is_active`) returning `COMPATIBLE`, `INCOMPATIBLE`, or `UNKNOWN`.
-7. `store_inventory` (PostgreSQL): `id`, `store_id`, `physical_product_id`, `quantity_on_hand`, `quantity_reserved`, `quantity_allocated` (physical goods only; never tracks services).
-8. `stock_reservation` & `stock_movement` & `inventory_quarantine_stock` (PostgreSQL): Part 3/Part 8 stock hold, ledger, and quarantine tables.
+7. `store_inventory` (PostgreSQL): `id`, `store_id`, `physical_product_id`, `quantity_on_hand`, `quantity_reserved`, `quantity_allocated`, derived `available_quantity` (physical goods only; never tracks services).
+8. `stock_reservation_group`, `stock_reservation_line` & `inventory_operation` (PostgreSQL): Atomic store-scoped group reservations (`10m` checkout-entry TTL), line-level partial/full fulfillment tracking, and unpartitioned exactly-once operation audit (`P3-DEC-01`–`P3-DEC-07`). *(Inter-store transfers, dedicated quarantine/RMA tables, and annual partitioned movement ledgers are `DEFERRED_BY_OWNER_V1`.)*
 
-### 2.2 Stock Reservation Lifecycle
+### 2.2 Stock Reservation Lifecycle (`P3-DEC-02`, `P3-DEC-07`)
 ```text
-Stock Hold Lifecycle:
-  [HELD] --(Payment Succeeded)--> [CONFIRMED_ALLOCATED] --(Handover/Install)--> [FULFILLED]
-    |
-    +--(Timeout / Janitor)------> [EXPIRED]
-    +--(Checkout Cancelled)-----> [RELEASED]
+Stock Hold Lifecycle (Group & Line):
+  [HELD (10m)] --(Valid Unexpired Allocation)--> [ALLOCATED] --(Partial Handover/Ship)--> [PARTIALLY_FULFILLED]
+       |                                              |                                           |
+       +--(10m Timeout / Janitor)---> [EXPIRED]       +--(Full Handover/Ship)---------------------> [FULFILLED]
+       +--(Explicit Cancel / Fail)--> [RELEASED]      +--(Cancel Unfulfilled Remainder)-----------> [CANCELLED / FULFILLED*]
+                                                      (*FULFILLED with cancelled_quantity > 0 if partially fulfilled prior)
 ```
 
 ---
@@ -85,18 +86,18 @@ Stock Hold Lifecycle:
 | :--- | :--- | :--- | :---: | :--- | :---: |
 | **ACT-PRD-006** | Query Branch Stock Balances | `GET /api/v1/automotive/products/inventory/balances` | PUBLIC / INTERNAL| Read-committed ATP calculation | < 30 ms |
 | **ACT-PRD-007** | Batch Query Multi-Store Stock | `POST /api/v1/automotive/products/inventory/balances:batch`| INTERNAL / SAGA | Batch IN query across stores | < 45 ms |
-| **ACT-PRD-008** | Reserve Physical Stock | `POST /api/v1/automotive/products/inventory/reservations` | INTERNAL / SAGA | Conditional atomic update on `store_inventory`| < 35 ms |
-| **ACT-PRD-009** | Confirm Stock Allocation | `POST /api/v1/automotive/products/inventory/reservations/{id}/confirm`| INTERNAL / SAGA | Moves `reserved` -> `allocated`; `on_hand` same| < 40 ms |
-| **ACT-PRD-010** | Release / Compensate Stock Hold | `DELETE /api/v1/automotive/products/inventory/reservations/{id}`| INTERNAL / SAGA | Decrements `reserved` | < 35 ms |
-| **ACT-PRD-011** | Ingest Warehouse Goods Receipt | `POST /api/v1/automotive/products/inventory/receipts` | STAFF | Increments `quantity_on_hand` | < 60 ms |
-| **ACT-PRD-012** | Dispatch Inter-Branch Transfer | `POST /api/v1/automotive/products/inventory/transfers/dispatch` | STAFF | Decrements source `on_hand` | < 70 ms |
-| **ACT-PRD-013** | Receive Inbound Inter-Branch Transfer | `POST /api/v1/automotive/products/inventory/transfers/receive` | STAFF | Increments dest `on_hand` | < 65 ms |
-| **ACT-PRD-014** | Execute Physical Stock Adjustment | `POST /api/v1/automotive/products/inventory/adjustments` | STAFF / ADMIN | Audit record in `stock_movement` | < 55 ms |
-| **ACT-PRD-018** | Query Inventory Movement Ledger | `GET /api/v1/automotive/products/inventory/movements` | STAFF / ADMIN | Date-range partitioned query | < 50 ms |
-| **ACT-PRD-019** | Janitor Purge of Expired Holds | `NO HTTP ENDPOINT` (`ReservationJanitorJob`) | INTERNAL | Background janitor running every 60s | < 60s delay |
-| **ACT-PRD-025** | Reconcile Inventory vs Ledger | `POST /api/v1/automotive/products/inventory/reconcile` | ADMIN | Periodic integrity audit | < 200 ms |
-| **ACT-PRD-028** | Mark Damaged Stock | `POST /api/v1/automotive/products/inventory/damage` | STAFF | Decrements `on_hand`; writes scrap audit | < 45 ms |
-| **ACT-PRD-031** | Record Physical Stock Handover | `POST /api/v1/automotive/products/inventory/fulfill-handover`| INTERNAL / STAFF | Decrements `quantity_allocated` AND `on_hand` | < 60 ms |
+| **ACT-PRD-008** | Reserve Physical Stock (Group) | `POST /api/v1/automotive/products/inventory/reservations` | INTERNAL / SAGA | Atomic lock-ordered group hold (`10m` TTL, `idempotency_key` + `canonical_request_hash`) | < 35 ms |
+| **ACT-PRD-009** | Confirm Group Stock Allocation | `POST /api/v1/automotive/products/inventory/reservations/{groupId}/confirm`| INTERNAL / SAGA | `HELD -> ALLOCATED` (`expires_at > now()`, `affected_rows = 1`) | < 40 ms |
+| **ACT-PRD-010** | Release / Compensate Group Hold | `DELETE /api/v1/automotive/products/inventory/reservations/{groupId}`| INTERNAL / SAGA | `HELD -> RELEASED`; decrements `reserved` once | < 35 ms |
+| **ACT-PRD-011** | Ingest Warehouse Goods Receipt | `POST /api/v1/automotive/products/inventory/receipts` | STAFF | Increments `quantity_on_hand` + `inventory_operation` (`operation_id`) | < 60 ms |
+| **ACT-PRD-012** | Dispatch Inter-Branch Transfer | `DEFERRED_BY_OWNER_V1` | — | Inter-store transfers removed from V1 scope (`P3-DEC-03`, `INV-12`) | — |
+| **ACT-PRD-013** | Receive Inbound Inter-Branch Transfer | `DEFERRED_BY_OWNER_V1` | — | Inter-store transfers removed from V1 scope (`P3-DEC-03`, `INV-12`) | — |
+| **ACT-PRD-014** | Execute Physical Stock Adjustment | `POST /api/v1/automotive/products/inventory/adjustments` | STAFF / ADMIN | Minimal guarded `STOCK_ADJUSTMENT` in `inventory_operation` (`on_hand + delta >= reserved + allocated`; broad RMA/quarantine `DEFERRED_BY_OWNER_V1`) | < 55 ms |
+| **ACT-PRD-018** | Query Inventory Operation Audit | `GET /api/v1/automotive/products/inventory/operations` | STAFF / ADMIN | Unpartitioned `inventory_operation` lookup (full movement ledger/UI `DEFERRED_BY_OWNER_V1`, `P3-DEC-05`) | < 50 ms |
+| **ACT-PRD-019** | Janitor Purge of Expired Holds | `NO HTTP ENDPOINT` (`ReservationJanitorJob`) | INTERNAL | Background janitor every 60s (`SKIP LOCKED`, expires `10m` `HELD` groups) | < 60s delay |
+| **ACT-PRD-025** | Reconcile Inventory Balances | `POST /api/v1/automotive/products/inventory/reconcile` | ADMIN | Basic balance/reservation consistency check (full ledger replay `DEFERRED_BY_OWNER_V1`, `INV-17`) | < 200 ms |
+| **ACT-PRD-028** | Mark Damaged Stock / Quarantine | `DEFERRED_BY_OWNER_V1` | — | Dedicated damage/quarantine/RMA workflow deferred (`P3-DEC-04`, `INV-14`) | — |
+| **ACT-PRD-031** | Record Physical Stock Handover / Dispatch | `POST /api/v1/automotive/products/inventory/fulfill-handover`| INTERNAL / STAFF | Idempotent (`operation_id`); partial/full decrement of `allocated` & `on_hand` | < 60 ms |
 
 #### Part 2 Catalog, Pricing & Fitment API Examples (`P2-DEC-01`–`P2-DEC-05`)
 
@@ -162,88 +163,74 @@ Stock Hold Lifecycle:
      - Conflicting active evidence rows → `"fitment_required": true`, `result: "UNKNOWN"`, `reasons: ["CONFLICTING_FITMENT_EVIDENCE"]`.
      - Tire with `speed_rating = "S"` (180 km/h) vs `min_speed_rating = "T"` (190 km/h) → `"fitment_required": true`, `result: "INCOMPATIBLE"`.
 
-#### Detailed Endpoint Specification: ACT-PRD-008 (Reserve Physical Stock)
+#### Detailed Endpoint Specification: ACT-PRD-008 (Atomic Group Reserve Physical Stock)
 - **HTTP Method & Path**: `POST /api/v1/automotive/products/inventory/reservations` (Visibility: INTERNAL)
 - **Request Headers**: `Idempotency-Key: {uuid}`, `Authorization: Bearer {internal_token}`
+- **Contract (`P3-DEC-01`, `P3-DEC-07`)**: Accepts one store-scoped group of `physical_product_id` lines (services are rejected with `422`) plus the single authoritative `expires_at` deadline generated by `automotive-operations` (`checkout_attempt.expires_at`). Normalizes duplicate product IDs by summing quantities (rejects `<= 0`/overflow), sorts by UUID, validates `clock_timestamp() < expires_at <= clock_timestamp() + INTERVAL '10 minutes 5 seconds'` (never extending `expires_at` by another 10 minutes), computes `canonical_request_hash` (SHA-256 including `expires_at`), and claims `(store_id, idempotency_key)` / `checkout_attempt_id` first via `INSERT ... ON CONFLICT DO NOTHING` before locking `store_inventory`.
 - **Request Body**:
   ```json
   {
     "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-    "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
-    "quantity": 4,
-    "ttl_minutes": 15,
-    "order_id": "ord-20261123-0091"
+    "checkout_attempt_id": "att-8877-6655-4433-221100998877",
+    "idempotency_key": "9c8b7a6f-5e4d-3c2b-1a0f-9e8d7c6b5a4f",
+    "expires_at": "2026-11-26T18:10:00Z",
+    "lines": [
+      { "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a", "quantity": 4 },
+      { "physical_product_id": "c4d5e6f7-8a9b-4c0d-9e1f-2a3b4c5d6e7f", "quantity": 4 }
+    ]
   }
   ```
-- **Response**: `201 Created`
+- **Response**: `201 Created` (or `200 OK` on idempotent replay)
   ```json
   {
-    "reservation_id": "res-9988-7766-5544",
-    "status": "HELD",
+    "reservation_group_id": "grp-9988-7766-5544-33221100aabb",
+    "checkout_attempt_id": "att-8877-6655-4433-221100998877",
     "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-    "sku_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
-    "quantity": 4,
-    "expires_at": "2026-11-23T23:35:00Z"
+    "status": "HELD",
+    "expires_at": "2026-11-26T18:10:00Z",
+    "lines": [
+      { "line_id": "ln-1111", "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a", "requested_quantity": 4, "held_quantity": 4, "status": "HELD" },
+      { "line_id": "ln-2222", "physical_product_id": "c4d5e6f7-8a9b-4c0d-9e1f-2a3b4c5d6e7f", "requested_quantity": 4, "held_quantity": 4, "status": "HELD" }
+    ]
   }
   ```
-- **Concurrency Algorithm (Atomic Conditional Update)**:
-  ```sql
-  UPDATE store_inventory
-  SET quantity_reserved = quantity_reserved + :req_qty
-  WHERE store_id = :store_id
-    AND sku_id = :sku_id
-    AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty
-  RETURNING id, quantity_on_hand, quantity_reserved, quantity_allocated;
-  ```
-### 3.4 Rigorous Inventory Commands & Lifecycle Transitions
 
-To maintain strict physical accounting, financial auditability, and prevent blind counter decrements upon events, `automotive-product` exposes separate, conditionally verified commands for each distinct inventory lifecycle event:
-
-```mermaid
-stateDiagram-v2
-    [*] --> ATP : Physical Stock Received (ACT-PRD-011)
-    ATP --> RESERVED : 1. Checkout Hold (ACT-PRD-008)
-    RESERVED --> ATP : 1a. Checkout Aborted / Expired (ACT-PRD-010)
-    RESERVED --> ALLOCATED : 2. Payment Succeeded (ACT-PRD-009)
-    ALLOCATED --> ATP : 2a. Order Cancelled Prior to Fulfillment (ACT-PRD-010B)
-    ALLOCATED --> HANDED_OVER : 3. Counter Pickup Handover / Service Installed (ACT-PRD-031)
-    HANDED_OVER --> RETURNED : 4. Physically Returned & Inspected (ACT-PRD-014)
-    RETURNED --> ATP : Restocked to Available Inventory
-```
+### 3.4 Rigorous Inventory Commands, Transitions & Part 3 Examples
 
 1. **Release Active Checkout Reservation (`ACT-PRD-010`)**:
-   - *Trigger*: Checkout saga compensation or expiration janitor (`ACT-PRD-019`).
-   - *State Transition*: `quantity_reserved = quantity_reserved - :qty` (where `status = 'ACTIVE'`).
-   - *Effect on On-Hand*: `quantity_on_hand` unchanged. Restores Available-to-Promise ($	ext{ATP}$).
-2. **Cancel Confirmed Order Allocation (`ACT-PRD-010B` - Allocation Cancellation)**:
-   - *Endpoint*: `POST /api/v1/automotive/products/inventory/allocations/{id}/cancel`
-   - *Trigger*: Post-payment order cancellation (`ACT-OPS-007`).
-   - *Preconditions*: Allocation must be in state `ALLOCATED_PENDING_FULFILLMENT`.
-   - *State Transition*: `quantity_allocated = quantity_allocated - :qty` (where `id = :allocationId AND status = 'ALLOCATED'`).
-   - *Effect on On-Hand*: `quantity_on_hand` unchanged. Restores $	ext{ATP}$. Emits `StockAllocationCancelledEvent`.
-   - *Duplicate / Concurrent Handling*: If already fulfilled (`HANDED_OVER`), cancellation is rejected with HTTP 409 Conflict.
-3. **Partial Order Fulfillment**:
-   - Supports line-level fulfillment tracking: records `fulfilled_quantity` on allocation item. Decrements `quantity_allocated` and `quantity_on_hand` strictly by fulfilled quantity. Unfulfilled remainder stays allocated until subsequent fulfillment or explicit partial cancellation.
-4. **Physical Handover / Installation (`ACT-PRD-031`)**:
-   - *Trigger*: Customer carry-out PIN verification (`ACT-OPS-016`) or technician work order finalization (`ACT-OPS-014`).
-   - *Preconditions*: Allocation status must be `ALLOCATED`.
-   - *State Transition*: `quantity_on_hand = quantity_on_hand - :qty, quantity_allocated = quantity_allocated - :qty`.
-   - *Effect on ATP*: $	ext{ATP}$ formula remains identical since both on-hand and allocated drop by the same quantity.
-5. **Physical Goods Return, Inspection & Disposition (`ACT-PRD-014` & `ACT-PRD-028`)**:
-   - *Strict Accounting Principle*: Physically returned items are NEVER automatically returned to sellable Available-to-Promise inventory.
-   - *Mandatory Inspection & Quarantine*:
-     - When tires are returned physically to a store counter, store staff issues `POST /api/v1/automotive/products/inventory/returns/intake`. Stock enters `RETURNED_QUARANTINE` status in `inventory_quarantine_item`. `quantity_on_hand` and Available-to-Promise ($	ext{ATP}$) remain unchanged.
-     - Store manager or certified technician conducts physical inspection for tread wear (32nds inch gauge), bead tears, punctures, and mounting marks.
-   - *Formal Disposition Outcomes*:
-     - *Outcome A (Sellable - Full Restock)*: If unmounted and pristine, manager approves restock (`ACT-PRD-014`). Executes `quantity_on_hand = quantity_on_hand + :qty` with audit reason `RMA_RESTOCK_APPROVED`. Stock returns to $	ext{ATP}$.
-     - *Outcome B (Damaged / Unsellable)*: If damaged or worn, item is written off via `ACT-PRD-028` (`Mark Damaged Stock`). Stock moves to salvage scrap inventory; never enters $	ext{ATP}$.
-     - *Outcome C (Warranty / Factory Defect)*: Item logged into `warranty_dispute_log` for vendor credit claims against distributor/OEM.
-     - *Outcome D (Service Rework / Dispute)*: Defective installation rework consumes warranty parts without charging customer; logged against original `work_order_id`.
-6. **Accounting for Consumed Service Parts**:
-   - Shop supplies (valve stems, wheel weights, oil) consumed during work orders are deducted directly from on-hand inventory via `ACT-PRD-031` linked to the `work_order_id`, recording permanent audit entries in `inventory_movement_ledger`.
+   - *Trigger*: Checkout cancellation/payment failure or `ReservationJanitorJob` (`ACT-PRD-019`).
+   - *State Transition*: `HELD -> RELEASED | EXPIRED`, `quantity_reserved = quantity_reserved - held_quantity` (`WHERE status = 'HELD'`, `affected_rows = 1` required). `quantity_on_hand` unchanged.
+2. **Cancel Confirmed Allocation (`ACT-PRD-010B`)**:
+   - *Endpoint*: `POST /api/v1/automotive/products/inventory/allocations/{groupId}/cancel`
+   - *Preconditions*: Line status in `('ALLOCATED', 'PARTIALLY_FULFILLED')`; requires `operation_id` + `request_hash`.
+   - *State Transition*: Releases only unfulfilled `allocated_quantity` back to ATP (`quantity_allocated = quantity_allocated - rem_qty`); `quantity_on_hand` and already `fulfilled_quantity` remain untouched. Emits `StockAllocationCancelledEvent`.
+3. **Partial & Full Physical Handover / Installation / Shipping Dispatch (`ACT-PRD-031`)**:
+   - *Endpoint*: `POST /api/v1/automotive/products/inventory/fulfill-handover`
+   - *Preconditions*: Requires unique batch `operation_id` + `request_hash` (`inventory_operation_batch`), supporting single-line or multi-line fulfillment in one atomic TX; every line must be in `('ALLOCATED', 'PARTIALLY_FULFILLED')` with `deliver_qty <= allocated_quantity` (any line failure rolls back the entire batch).
+   - *State Transition*: Decrements `quantity_on_hand` and `quantity_allocated` by `deliver_qty`, adds `deliver_qty` to `fulfilled_quantity`, inserts one `inventory_operation` row per line under `batch_id`, and transitions each line to `PARTIALLY_FULFILLED` or `FULFILLED`. Supports `FULFILLMENT_PICKUP`, `FULFILLMENT_WORKSHOP`, and `FULFILLMENT_SHIPMENT` (`shipped != delivered`; delivery ack never deducts again).
+4. **Minimal Physical Stock Adjustment (`ACT-PRD-014`)**:
+   - *Endpoint*: `POST /api/v1/automotive/products/inventory/adjustments`
+   - *Preconditions*: Staff/Admin `actor_id`, `reason_code`, unique `operation_id` + `request_hash`. Guards `(quantity_on_hand + delta - quantity_reserved - quantity_allocated) >= 0` (`409 ADJUSTMENT_BREACHES_COMMITMENTS` if breached). Never uses `PARTIALLY_FULFILLED` for damaged stock.
+   - *V1 Deferrals (`DEFERRED_BY_OWNER_V1`)*: Inter-store transfers (`ACT-PRD-012`/`013`), dedicated quarantine/RMA intake & disposition (`ACT-PRD-028`), and full movement-ledger reconstruction (`ACT-PRD-018`/`025` full replay) are deferred by owner for V1 (`P3-DEC-03`–`P3-DEC-05`).
+
+#### Part 3 Request/Response & Stock Arithmetic Examples (`P3-DEC-01`–`P3-DEC-07`)
+*(Baseline at Store `S1 = 1a2b...5c6d`: Tire `T1 = 8a3e...5f6a` has `on_hand=10, reserved=0, allocated=0, ATP=10`; Wheel `W1 = c4d5...6e7f` has `on_hand=6, reserved=0, allocated=0, ATP=6`.)*
+
+1. **All-or-Nothing 4 Tires + 4 Wheels Hold (`201 Created`)**: Checkout entry creates `grp-1` (`expires_at = T0 + 10m`). Before: `T1(10/0/0, ATP=10)`, `W1(6/0/0, ATP=6)`. After: `T1(10/4/0, ATP=6)`, `W1(6/4/0, ATP=2)`.
+2. **Insufficient Wheel Rollback (`409 INSUFFICIENT_STOCK`)**: Suppose `W1` only had `ATP=2`. Request for `4 T1 + 4 W1` locks `T1` then `W1`, detects `W1 ATP=2 < 4`, **rolls back the entire TX**: `T1` stays `10/0/0 (ATP=10)` and `W1` stays `6/0/0 (ATP=6)`. Response lists `W1: {requested: 4, available: 2}` without leaking other stores.
+3. **Same-Key + Same-Fingerprint Replay (`200 OK`)**: Retry of `grp-1` with identical `idempotency_key` and `canonical_request_hash` returns the exact persisted `grp-1` response and `expires_at = T0 + 10m`. Stock counters remain `T1(10/4/0)`, `W1(6/4/0)`.
+4. **Same-Key + Different-Fingerprint Mismatch (`409 IDEMPOTENCY_PAYLOAD_MISMATCH`)**: Reusing `grp-1`'s `idempotency_key` with `quantity: 2` produces a different `canonical_request_hash` and is rejected with `409`; no stock changes.
+5. **Two Concurrent Customers Competing for Last 4 Units**: Customer A and Customer B both request 4 `W1` when `ATP=4` (`6/2/0`). PostgreSQL `FOR UPDATE` serializes them: A succeeds (`6/6/0, ATP=0`); B resumes, sees `ATP=0 < 4`, rolls back, and receives `409 INSUFFICIENT_STOCK`.
+6. **Checkout Refresh (`GET /checkout/sessions/{attemptId}`)**: Browser reload calls `GET` on `att-1`; `automotive-operations` returns the existing `checkout_attempt` and `grp-1` with the original `expires_at = T0 + 10m`. Zero new reservations or TTL extensions.
+7. **10-Minute Timeout (`ReservationJanitorJob`)**: At `T0 + 10m05s` with no confirmation, janitor locks `grp-1` (`status = 'HELD' AND expires_at <= clock_timestamp()`), transitions `grp-1` to `EXPIRED`, and decrements `reserved`: `T1(10/0/0, ATP=10)`, `W1(6/0/0, ATP=6)`.
+8. **Expired Hold vs. Late Payment Confirmation Race**: Payment webhook arrives at `T0 + 10m12s` and calls `POST /reservations/grp-1/confirm`. `grp-1` is already `EXPIRED` (or `expires_at <= clock_timestamp()`): returns `409 RESERVATION_EXPIRED` (never resurrects stock) so Part 6 Saga voids/refunds per reconciliation policy.
+9. **Multi-Line Partial Shipping Dispatch (`ACT-PRD-031`, `op-ship-1`)**: After `grp-1` confirmed to `ALLOCATED` (`T1: 10/0/4, ATP=6`; `W1: 6/0/4, ATP=2`), warehouse ships 2 `T1` + 2 `W1` in one request (`operation_id = op-ship-1`). `inventory_operation_batch` claims `op-ship-1` first, locks both lines/inventory rows, decrements `T1(8/0/2, ATP=6)` and `W1(4/0/2, ATP=2)`, writes two `inventory_operation` child rows under `batch_id`, and transitions both lines + `grp-1` to `PARTIALLY_FULFILLED` (`fulfilled_quantity = 2`). Carrier delivery confirmation later does **not** decrement stock again.
+10. **Duplicate Multi-Line Shipment Retry (`op-ship-1`)**: Retrying `POST /fulfill-handover` with `operation_id = op-ship-1` and matching `request_hash` hits `inventory_operation_batch.operation_id` uniqueness and replays `200 OK` without touching `T1(8/0/2)` or `W1(4/0/2)` (mismatched payload returns `409 IDEMPOTENCY_PAYLOAD_MISMATCH`).
+11. **Allocation Cancel of Unfulfilled Remainder (`ACT-PRD-010B`)**: Customer cancels remaining 2 `T1` (`op-cancel-1`). Before: `T1(8/0/2, ATP=6)`. After: `T1(8/0/0, ATP=8)`, `requested_quantity = 4`, `fulfilled_quantity = 2`, `cancelled_quantity = 2`, `allocated_quantity = 0`, line status = `FULFILLED` (group reaches terminal `FULFILLED` once all lines are terminal with `>= 1` fulfilled unit).
+12. **Guarded Stock Adjustment (`ACT-PRD-014`)**: When `T1` is `8/0/2` (`reserved=0, allocated=2, ATP=6`), staff adjustment `delta = -2` (`op-adj-1`) succeeds: `T1(6/0/2, ATP=4)`. An adjustment `delta = -7` would make `on_hand(1) < allocated(2)` and is rejected with `409 ADJUSTMENT_BREACHES_COMMITMENTS` (`T1` stays `6/0/2`).
 
 ---
 
 ## 4. Background Operations & Daemons
-1. **`ReservationJanitorJob`** (`ACT-PRD-019`): Runs every 60 seconds; selects expired holds with `FOR UPDATE SKIP LOCKED`; releases `quantity_reserved`; marks reservations `EXPIRED`.
-2. **`StockLedgerArchivalJob`**: Runs daily at 02:00 AM; archives movement ledger records older than 365 days into cold storage.
+1. **`ReservationJanitorJob`** (`ACT-PRD-019`): Runs every 60 seconds; selects expired `HELD` groups (`expires_at <= clock_timestamp()`) with `FOR UPDATE SKIP LOCKED`; releases `quantity_reserved`; marks group and lines `EXPIRED`.
+2. **`StockLedgerArchivalJob`**: `DEFERRED_BY_OWNER_V1` (annual `stock_movements` partitioning removed in V1 per `P3-DEC-05`).

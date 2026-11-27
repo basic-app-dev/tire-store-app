@@ -26,42 +26,45 @@ Every distributed retail and service platform must balance consistency, latency,
 ## 2. Inventory Management Strategies
 
 ### 2.1 The Problem
-Prevent physical inventory overselling and phantom stock holds while supporting high-concurrency catalog browsing, multi-item checkouts, inter-branch transfers, damaged stock adjustments, and physical handover. Reserving stock for an ongoing checkout must never prematurely deduct physical on-hand stock.
+Prevent physical inventory overselling and phantom stock holds while supporting high-concurrency catalog browsing, atomic multi-product checkout-entry holds, guarded physical stock adjustments, and partial/full physical handover. Reserving stock for an ongoing checkout must never prematurely deduct physical on-hand stock. *(Inter-store transfers and dedicated return/quarantine workflows are `DEFERRED_BY_OWNER_V1` per `P3-DEC-03`/`P3-DEC-04`.)*
 
 ### 2.2 Competing Alternatives
 1. **Alternative A: Redis Atomic Counter (`DECRBY` / EVAL Lua script)**: Very fast memory-based hold, but volatile. If Redis fails or restarts, reservations can be lost or drift from the database truth. Requires dual-write synchronization with PostgreSQL.
 2. **Alternative B: PostgreSQL Optimistic Locking (`version` column)**: High retry rate under contention for popular tire SKUs during promotions; aborted transactions waste client latency.
-3. **Alternative C: PostgreSQL Pessimistic Locking (`SELECT FOR UPDATE`)**: Strong isolation, but locks the entire inventory row during processing, increasing queueing delays and risking deadlocks when checkouts reserve multiple SKUs in arbitrary order.
-4. **Alternative D (SELECTED): PostgreSQL Conditional Atomic UPDATE with Dual State Ledger**: Executes an atomic state transition in PostgreSQL:
+3. **Alternative C: Unordered Pessimistic Locking (`SELECT FOR UPDATE`)**: Arbitrary lock acquisition order across multi-SKU checkouts causes frequent deadlock cycles.
+4. **Alternative D (SELECTED — `P3-DEC-01`, `P3-DEC-06`)**: **PostgreSQL Deterministic Lock-Ordered Atomic Group Reservation**:
+   - Claims `(store_id, idempotency_key)` and `checkout_attempt_id` first via `INSERT INTO automotive_product.stock_reservation_group (...) ON CONFLICT DO NOTHING RETURNING id` before any inventory mutation (replays matching `canonical_request_hash`, rejects mismatched hash or conflicting `checkout_attempt_id` with `409`).
+   - Locks requested `store_inventory` rows in ascending `physical_product_id` UUID order (`FOR UPDATE`), verifies every line exists and `ATP >= req_qty` (rolling back the entire TX including the claimed group on failure), and executes guarded conditional updates checking `affected_rows = 1` for every line:
    ```sql
-   UPDATE store_inventory
-   SET quantity_reserved = quantity_reserved + :req_qty
+   UPDATE automotive_product.store_inventory
+   SET quantity_reserved = quantity_reserved + :req_qty,
+       version = version + 1,
+       updated_at = clock_timestamp()
    WHERE store_id = :store_id
-     AND sku_id = :sku_id
-     AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty
-   RETURNING id, quantity_on_hand, quantity_reserved, quantity_allocated;
+     AND physical_product_id = :physical_product_id
+     AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty;
    ```
-   Paired with an atomic insert into `stock_reservation` in the same local transaction.
+   - Preserves the single authoritative `expires_at` passed from `automotive-operations` (`checkout_attempt.expires_at`), inserts `stock_reservation_line` rows and local `outbox_event` in the same ACID transaction. Uses bounded retry (up to 3 attempts) for SQLSTATE `40P01`/`40001` without changing `idempotency_key` (never claiming sorted locks eliminate all deadlocks).
 
 ### 2.3 Evaluation Matrix
 | Strategy | Concurrency Safety | p95 Latency | Deadlock Risk | Crash Recovery | Verdict |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| Redis In-Memory Counter | Weak (Drift) | < 5 ms | Zero | Complex Re-sync | Rejected (Durability Risk) |
+| Redis In-Memory Counter | Weak (Drift) | < 5 ms | Zero | Complex Re-sync | Rejected (Durability Risk, `P3-DEC-06`) |
 | Optimistic Locking | Moderate (Aborts) | 40–120 ms | Low | Simple Rollback | Rejected (High Contention Aborts) |
-| Pessimistic Row Lock | High | 50–200 ms | High (Multi-SKU) | Clean Rollback | Rejected for Holds |
-| **Conditional Atomic Update** | **Absolute** | **15–35 ms** | **Zero** | **PostgreSQL WAL + Outbox** | **SELECTED** |
+| Unordered Row Lock | High | 50–200 ms | High (Multi-SKU) | Clean Rollback | Rejected |
+| **Deterministic Lock-Ordered Group Update** | **Absolute** | **15–35 ms** | **Mitigated (Bounded Retry)** | **PostgreSQL WAL + Outbox** | **SELECTED** |
 
-### 2.4 Concrete Inventory Ledger Semantics
+### 2.4 Concrete Inventory Ledger Semantics (`P3-DEC-02`, `P3-DEC-05`, `P3-DEC-07`)
 - **Stock Invariant**:
   $$\text{Available-to-Promise (ATP)} = \text{quantity\_on\_hand} - (\text{quantity\_reserved} + \text{quantity\_allocated}) \ge 0$$
-- **Tentative Hold (Checkout Initiation)**:
-  Increments `quantity_reserved` by $N$. `quantity_on_hand` and `quantity_allocated` are untouched. Creates `stock_reservation` with `status = 'HELD'` and 15-minute TTL.
-- **Allocation Confirmation (Payment Success)**:
-  Atomically decrements `quantity_reserved` by $N$ and increments `quantity_allocated` by $N$. **`quantity_on_hand` remains untouched!**
-- **Physical Fulfillment Handover (Customer Pickup or Bay Installation)**:
-  Atomically decrements `quantity_allocated` by $N$ and `quantity_on_hand` by $N$. Writes permanent audit entry in `stock_movement` with type `FULFILLMENT_PICKUP` or `WORKSHOP_CONSUMPTION`.
-- **Compensation / Expiration (Checkout Failure or Timeout)**:
-  Atomically decrements `quantity_reserved` by $N$.
+- **Checkout-Entry Hold (`P3-DEC-07`, supersedes `COR-DIR-04`)**:
+  Adding to cart **never** reserves stock. First server-side creation of a store-scoped `checkout_attempt` increments `quantity_reserved` by $N$ (`quantity_on_hand` and `quantity_allocated` untouched) and creates `stock_reservation_group` with `status = 'HELD'` and **10-minute** `expires_at`.
+- **Allocation Confirmation (Authorized Progression)**:
+  Under an unexpired `HELD` group, atomically decrements `quantity_reserved` by $N$ and increments `quantity_allocated` by $N$. **`quantity_on_hand` remains untouched!**
+- **Partial/Full Physical Fulfillment Handover (Pickup, Workshop Install, or Shipping Dispatch)**:
+  Atomically decrements `quantity_allocated` by $\Delta$ and `quantity_on_hand` by $\Delta$, recording `inventory_operation` keyed by unique `operation_id`. (`shipped != delivered`; delivery acknowledgment never decrements stock again.)
+- **Compensation / Expiration (Checkout Failure or 10-Minute Timeout)**:
+  Atomically decrements `quantity_reserved` by $N$ once only (`HELD -> RELEASED | EXPIRED`). Late confirmations after expiry never resurrect stock.
 
 ---
 

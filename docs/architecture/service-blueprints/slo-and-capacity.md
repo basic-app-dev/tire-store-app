@@ -100,8 +100,8 @@ All errors return `application/problem+json` containing `type`, `title`, `status
 
 | Service | Daemon / Worker | Trigger | Concurrency Control | Freshness / SLO Target |
 | :--- | :--- | :--- | :--- | :--- |
-| **`automotive-product`** | `ReservationJanitorJob` | Fixed delay 60s | PostgreSQL `SKIP LOCKED` | Cleans expired holds within 60s |
-| **`automotive-product`** | `StockLedgerArchivalJob`| Cron daily at 02:00 AM | Date-range partition drop | Moves records > 365 days old |
+| **`automotive-product`** | `ReservationJanitorJob` | Fixed delay 60s | PostgreSQL `SKIP LOCKED` | Expires 10m holds within 60s (`P3-DEC-07`) |
+| **`automotive-product`** | `StockLedgerArchivalJob`| `DEFERRED_BY_OWNER_V1` | — | Annual movement partitioning removed in V1 (`P3-DEC-05`) |
 | **`automotive-operations`** | `CheckoutSagaRecoveryJob`| Fixed delay 60s | PostgreSQL `SKIP LOCKED` | Recovers crashed sagas within 5m |
 | **All Producing Services** | `TransactionalOutboxRelay`| Fixed delay 500ms (Part 1 default) | PostgreSQL `SKIP LOCKED` (batch 50, 60s lease) | Publishes to `tirestore.events` with confirms (poll interval does not guarantee delivery latency) |
 | **`automotive-operations`** | `AbandonedCartEvaluator` | Cron hourly at :15 | Redis scan with cursor | Flags inactive carts $\ge 24\text{h}$ |

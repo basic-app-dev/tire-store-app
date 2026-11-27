@@ -1,8 +1,8 @@
 # Physical Data Architecture Specification: `automotive-product`
 
 > **Service Identity**: `automotive-product` (Port 8092)
-> **Status**: AUTHORITATIVE PART 2 SPECIFICATION (Updated 2026-11-26 per `P2-DEC-01`–`P2-DEC-05`; DDL **NOT EXECUTED** in Part 2)
-> **Primary Storage**: PostgreSQL (catalog, typed category specs, service prices, YMMT fitment evidence, branch inventory, stock reservations, movements, quarantine, outbox/inbox)
+> **Status**: AUTHORITATIVE PART 2 + PART 3 SPECIFICATION (Updated 2026-11-26 per `P2-DEC-01`–`P2-DEC-05` & `P3-DEC-01`–`P3-DEC-07`; DDL **NOT EXECUTED**)
+> **Primary Storage**: PostgreSQL (catalog, typed category specs, service prices, YMMT fitment evidence, branch inventory, atomic group reservations, minimal operation audit, outbox/inbox)
 > **Logical Database**: `automotive_product_db` | **Database Schema**: `automotive_product`
 > **Flyway & Role Ownership (`OPS-01`)**: `spring.flyway.schemas=automotive_product`, `spring.flyway.default-schema=automotive_product`; migration role `automotive_product_migrator` (DDL on `automotive_product` only), runtime role `automotive_product_app` (DML only, zero cross-DB/schema grants).
 > **Owned Modules**: Catalog & Services Module, Vehicle Fitment Module, Branch Inventory & Stock Allocation Module
@@ -20,8 +20,11 @@ erDiagram
     PHYSICAL_PRODUCT ||--o| WHEEL_SPEC : "typed 1:1 (WHEEL)"
     PHYSICAL_PRODUCT ||--o| BRAKE_SPEC : "typed 1:1 (BRAKE)"
     PHYSICAL_PRODUCT ||--o{ STORE_INVENTORY : stocked_at
-    STORE_INVENTORY ||--o{ STOCK_RESERVATION : holds
-    STORE_INVENTORY ||--o{ STOCK_MOVEMENT : tracks
+    PHYSICAL_PRODUCT ||--o{ STOCK_RESERVATION_LINE : reserved_in
+    STOCK_RESERVATION_GROUP ||--|{ STOCK_RESERVATION_LINE : contains
+    INVENTORY_OPERATION_BATCH ||--|{ INVENTORY_OPERATION : groups
+    PHYSICAL_PRODUCT ||--o{ INVENTORY_OPERATION : audited_by
+    STOCK_RESERVATION_LINE ||--o{ INVENTORY_OPERATION : transitions_via
     SERVICE ||--o{ STORE_SERVICE_PRICE : priced_at
     VEHICLE_CONFIGURATION ||--o{ TIRE_FITMENT_EVIDENCE : fits
     VEHICLE_CONFIGURATION ||--o{ WIPER_FITMENT_EVIDENCE : fits
@@ -283,8 +286,8 @@ CREATE TABLE automotive_product.brake_fitment_evidence (
   4. **Brake (`brake_spec` vs `brake_fitment_evidence`)**:
      - Explicit `(vehicle_configuration_id, physical_product_id, position)` active evidence required (missing → `UNKNOWN`; position mismatch such as `FRONT` pad on `REAR` request → `INCOMPATIBLE`).
 
-### 2.5 Branch Physical Inventory, Reservations & Movement Ledger (Part 3 Scope Preserved)
-> **Note**: `physical_product_id` below corresponds 1:1 to legacy `sku_id` UUIDs; Part 3 will finalize multi-SKU group reservations (`INV-01`–`INV-18`).
+### 2.5 Branch Physical Inventory & Atomic Group Reservations (`P3-DEC-01`, `P3-DEC-02`, `P3-DEC-06`, `P3-DEC-07`)
+> **Scope & Ownership**: `store_inventory` tracks **physical products only** (`physical_product_id` = legacy `sku_id` alias); `service_id` never enters `store_inventory` or `stock_reservation_line`. `store_id` is an opaque UUID referencing `store-management` (zero cross-DB FK). No redundant `idx_inventory_store_sku` index is created (`INV-18`), as `uq_store_product` already provides the unique B-Tree on `(store_id, physical_product_id)`.
 
 ```sql
 CREATE TABLE automotive_product.store_inventory (
@@ -294,6 +297,9 @@ CREATE TABLE automotive_product.store_inventory (
     quantity_on_hand INTEGER NOT NULL DEFAULT 0 CHECK (quantity_on_hand >= 0),
     quantity_reserved INTEGER NOT NULL DEFAULT 0 CHECK (quantity_reserved >= 0),
     quantity_allocated INTEGER NOT NULL DEFAULT 0 CHECK (quantity_allocated >= 0),
+    available_quantity INTEGER GENERATED ALWAYS AS (
+        quantity_on_hand - quantity_reserved - quantity_allocated
+    ) STORED,
     version INTEGER NOT NULL DEFAULT 1,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_store_product UNIQUE (store_id, physical_product_id),
@@ -302,94 +308,118 @@ CREATE TABLE automotive_product.store_inventory (
     )
 );
 
-CREATE TABLE automotive_product.stock_reservations (
+-- Stored group status is maintained synchronously in the same ACID transaction as its component lines.
+CREATE TABLE automotive_product.stock_reservation_group (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     store_id UUID NOT NULL,
-    physical_product_id UUID NOT NULL REFERENCES automotive_product.physical_product(id) ON DELETE RESTRICT,
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    status VARCHAR(32) NOT NULL DEFAULT 'HELD',
-    order_id UUID NOT NULL,
+    checkout_attempt_id UUID NOT NULL, -- Opaque reference to automotive_operations.checkout_attempt(id)
     idempotency_key UUID NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
+    canonical_request_hash CHAR(64) NOT NULL, -- Versioned SHA-256 of canonicalized request payload
+    status VARCHAR(32) NOT NULL DEFAULT 'HELD',
+    failure_code VARCHAR(64) NULL,
+    expires_at TIMESTAMPTZ NOT NULL, -- Authoritative 10m deadline passed from automotive-operations.checkout_attempt (P3-DEC-07)
+    allocated_at TIMESTAMPTZ NULL,
+    released_at TIMESTAMPTZ NULL,
+    expired_at TIMESTAMPTZ NULL,
+    cancelled_at TIMESTAMPTZ NULL,
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    version INTEGER NOT NULL DEFAULT 1,
-    CONSTRAINT uq_reservation_idempotency UNIQUE (order_id, physical_product_id, idempotency_key),
-    CONSTRAINT chk_reservation_status CHECK (status IN (
-        'HELD', 'CONFIRMED', 'EXPIRED', 'RELEASED', 'FULFILLED'
+    CONSTRAINT uq_res_group_idempotency UNIQUE (store_id, idempotency_key),
+    CONSTRAINT uq_res_group_checkout_attempt UNIQUE (checkout_attempt_id),
+    CONSTRAINT chk_res_group_status CHECK (status IN (
+        'HELD', 'ALLOCATED', 'PARTIALLY_FULFILLED', 'FULFILLED',
+        'RELEASED', 'EXPIRED', 'CANCELLED'
     ))
 );
 
-CREATE INDEX idx_reservations_janitor ON automotive_product.stock_reservations (expires_at)
+CREATE INDEX idx_res_group_janitor ON automotive_product.stock_reservation_group (expires_at)
 WHERE status = 'HELD';
-CREATE INDEX idx_reservations_order ON automotive_product.stock_reservations (order_id);
 
-CREATE TABLE automotive_product.stock_movements (
-    id UUID DEFAULT gen_random_uuid(),
-    store_id UUID NOT NULL,
+CREATE TABLE automotive_product.stock_reservation_line (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    reservation_group_id UUID NOT NULL REFERENCES automotive_product.stock_reservation_group(id) ON DELETE RESTRICT,
     physical_product_id UUID NOT NULL REFERENCES automotive_product.physical_product(id) ON DELETE RESTRICT,
-    movement_type VARCHAR(32) NOT NULL,
-    quantity INTEGER NOT NULL,
-    reference_id VARCHAR(64) NOT NULL,
+    requested_quantity INTEGER NOT NULL CHECK (requested_quantity > 0),
+    held_quantity INTEGER NOT NULL CHECK (held_quantity >= 0),
+    allocated_quantity INTEGER NOT NULL DEFAULT 0 CHECK (allocated_quantity >= 0),
+    fulfilled_quantity INTEGER NOT NULL DEFAULT 0 CHECK (fulfilled_quantity >= 0),
+    cancelled_quantity INTEGER NOT NULL DEFAULT 0 CHECK (cancelled_quantity >= 0),
+    status VARCHAR(32) NOT NULL DEFAULT 'HELD',
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (id, created_at),
-    CONSTRAINT chk_movement_type CHECK (movement_type IN (
-        'GOODS_RECEIPT', 'FULFILLMENT_PICKUP', 'WORKSHOP_CONSUMPTION',
-        'TRANSFER_OUT', 'TRANSFER_IN', 'DAMAGE_SCRAP', 'COUNT_ADJUSTMENT'
-    ))
-) PARTITION BY RANGE (created_at);
-
-CREATE TABLE automotive_product.stock_movements_2026 PARTITION OF automotive_product.stock_movements
-FOR VALUES FROM ('2026-01-01 00:00:00Z') TO ('2027-01-01 00:00:00Z');
-
-CREATE INDEX idx_movements_product_store ON automotive_product.stock_movements (store_id, physical_product_id, created_at DESC);
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_res_line_group_product UNIQUE (reservation_group_id, physical_product_id),
+    CONSTRAINT chk_res_line_status CHECK (status IN (
+        'HELD', 'ALLOCATED', 'PARTIALLY_FULFILLED', 'FULFILLED',
+        'RELEASED', 'EXPIRED', 'CANCELLED'
+    )),
+    CONSTRAINT chk_res_line_qty_conservation CHECK (
+        held_quantity <= requested_quantity
+        AND allocated_quantity + fulfilled_quantity + cancelled_quantity <= requested_quantity
+        AND (
+            (status = 'HELD' AND held_quantity = requested_quantity AND allocated_quantity = 0 AND fulfilled_quantity = 0 AND cancelled_quantity = 0)
+            OR (status IN ('RELEASED', 'EXPIRED') AND held_quantity = 0 AND allocated_quantity = 0 AND fulfilled_quantity = 0 AND cancelled_quantity = 0)
+            OR (status = 'ALLOCATED' AND held_quantity = 0 AND allocated_quantity = requested_quantity AND fulfilled_quantity = 0 AND cancelled_quantity = 0)
+            OR (status = 'PARTIALLY_FULFILLED' AND held_quantity = 0 AND fulfilled_quantity > 0 AND allocated_quantity > 0 AND fulfilled_quantity + allocated_quantity + cancelled_quantity = requested_quantity)
+            -- Supports full fulfillment AND partial fulfillment + remainder cancellation (e.g., requested=4, fulfilled=2, cancelled=2, allocated=0)
+            OR (status = 'FULFILLED' AND held_quantity = 0 AND allocated_quantity = 0 AND fulfilled_quantity > 0 AND fulfilled_quantity + cancelled_quantity = requested_quantity)
+            OR (status = 'CANCELLED' AND held_quantity = 0 AND allocated_quantity = 0 AND fulfilled_quantity = 0 AND cancelled_quantity = requested_quantity)
+        )
+    )
+);
 ```
 
-### 2.6 Table: `inventory_quarantine_stock` & `quarantine_disposition_log`
+- **Group-Level Status Aggregation Invariant** (maintained synchronously in the same ACID transaction):
+  - `HELD` / `EXPIRED` / `RELEASED` / `ALLOCATED`: all component lines are in that same state.
+  - `PARTIALLY_FULFILLED`: at least one line is `PARTIALLY_FULFILLED`, OR lines are a mix of `ALLOCATED` and `FULFILLED`/`CANCELLED`.
+  - `FULFILLED` (terminal): all lines are terminal (`FULFILLED` or `CANCELLED`) and at least one line has `fulfilled_quantity > 0` (including mixed-fulfillment lines such as `requested=4, fulfilled=2, cancelled=2, allocated=0`).
+  - `CANCELLED` (terminal): all lines are `CANCELLED` (`fulfilled_quantity = 0` across the entire group).
+
+### 2.6 Minimal Unpartitioned Operation Audit (`inventory_operation_batch` & `inventory_operation` — `P3-DEC-03`, `P3-DEC-04`, `P3-DEC-05`)
+> **V1 Scope Deferrals (`DEFERRED_BY_OWNER_V1`)**: Inter-store transfers (`stock_transfer`, `INV-12`), dedicated quarantine/RMA workflows (`inventory_quarantine_stock`, `quarantine_disposition_log`, `INV-14`), and annual-partitioned movement ledgers (`stock_movements`, `INV-15`, `INV-17`) are **deferred by owner for V1** and removed from active V1 DDL. Only `inventory_operation_batch` + `inventory_operation` (unpartitioned, keyed by unique batch `operation_id` + `request_hash`) are retained to guarantee atomic, exactly-once single-line and multi-line stock changes (`INV-07`, `INV-08`, `INV-13`, `INV-16`).
+
 ```sql
-CREATE TABLE automotive_product.inventory_quarantine_stock (
+CREATE TABLE automotive_product.inventory_operation_batch (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    operation_id UUID NOT NULL UNIQUE, -- Stable caller business operation ID for the entire single/multi-line request
+    request_hash CHAR(64) NOT NULL,    -- SHA-256 of canonicalized request (type, store, group, sorted lines); mismatch -> 409
+    operation_type VARCHAR(32) NOT NULL CHECK (operation_type IN (
+        'GOODS_RECEIPT', 'FULFILLMENT_PICKUP', 'FULFILLMENT_WORKSHOP',
+        'FULFILLMENT_SHIPMENT', 'ALLOCATION_CANCEL', 'STOCK_ADJUSTMENT'
+    )),
     store_id UUID NOT NULL,
-    physical_product_id UUID NOT NULL REFERENCES automotive_product.physical_product(id) ON DELETE RESTRICT,
-    return_intake_number VARCHAR(64) NOT NULL UNIQUE,
-    quantity INTEGER NOT NULL CHECK (quantity > 0),
-    original_order_id UUID NULL,
-    original_work_order_id UUID NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'QUARANTINE_PENDING_INSPECTION',
-    intake_reason VARCHAR(64) NOT NULL,
-    intake_notes TEXT NULL,
-    received_by UUID NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT chk_quarantine_status CHECK (status IN (
-        'QUARANTINE_PENDING_INSPECTION',
-        'DISPOSITION_APPROVED_RESTOCK',
-        'DISPOSITION_DAMAGED_SCRAP',
-        'DISPOSITION_VENDOR_WARRANTY',
-        'DISPOSITION_SERVICE_REWORK'
-    ))
-);
-
-CREATE INDEX idx_quarantine_store_status ON automotive_product.inventory_quarantine_stock (store_id, status);
-
-CREATE TABLE automotive_product.quarantine_disposition_log (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    quarantine_stock_id UUID NOT NULL REFERENCES automotive_product.inventory_quarantine_stock(id) ON DELETE RESTRICT,
-    disposition_outcome VARCHAR(32) NOT NULL,
-    inspected_by UUID NOT NULL,
-    inspection_findings JSONB NOT NULL,
-    quantity_restocked INTEGER NOT NULL DEFAULT 0 CHECK (quantity_restocked >= 0),
-    quantity_scrapped INTEGER NOT NULL DEFAULT 0 CHECK (quantity_scrapped >= 0),
-    quantity_warranty_claimed INTEGER NOT NULL DEFAULT 0 CHECK (quantity_warranty_claimed >= 0),
-    approved_by UUID NOT NULL,
-    disposition_notes TEXT NULL,
+    reservation_group_id UUID NULL REFERENCES automotive_product.stock_reservation_group(id) ON DELETE RESTRICT,
+    actor_id UUID NOT NULL,
+    reason_code VARCHAR(64) NOT NULL,
+    origin_service VARCHAR(64) NOT NULL,
+    notes TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE automotive_product.inventory_operation (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id UUID NOT NULL REFERENCES automotive_product.inventory_operation_batch(id) ON DELETE RESTRICT,
+    physical_product_id UUID NOT NULL REFERENCES automotive_product.physical_product(id) ON DELETE RESTRICT,
+    reservation_line_id UUID NULL REFERENCES automotive_product.stock_reservation_line(id) ON DELETE RESTRICT,
+    order_id UUID NULL,
+    order_line_id UUID NULL,
+    quantity_delta_on_hand INTEGER NOT NULL,
+    quantity_delta_reserved INTEGER NOT NULL DEFAULT 0,
+    quantity_delta_allocated INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_inv_op_batch_product UNIQUE (batch_id, physical_product_id)
+);
+
+CREATE INDEX idx_inv_op_batch_store_created ON automotive_product.inventory_operation_batch (store_id, created_at DESC);
+CREATE INDEX idx_inv_op_product_created ON automotive_product.inventory_operation (physical_product_id, created_at DESC);
+CREATE INDEX idx_inv_op_res_line ON automotive_product.inventory_operation (reservation_line_id)
+WHERE reservation_line_id IS NOT NULL;
 ```
 
 ---
 
-## 3. Part 2 SQL Query & Concurrency Contracts (**NOT EXECUTED** in Part 2)
+## 3. Part 2 & Part 3 SQL Query, Atomic Reservation & Concurrency Contracts (**NOT EXECUTED**)
 
 1. **Typed Tire Search (`width_mm = 215 AND season = 'ALL_SEASON'`, selected store `ATP > 0`, no JSONB cast)**:
    ```sql
@@ -425,8 +455,58 @@ CREATE TABLE automotive_product.quarantine_disposition_log (
      AND (si.quantity_on_hand - si.quantity_reserved - si.quantity_allocated) > 0
    ORDER BY p.price_cents ASC, p.id ASC;
    ```
-3. **Part 3 Atomic Reservation SQL (Pending Part 3 Group Refactor)**:
-   *(Existing single-SKU `ACT-PRD-008` and `ACT-PRD-031` SQL snippets remain scoped to Part 3 `INV-01`–`INV-08` remediation.)*
+3. **Part 3 Atomic Group Reservation Algorithm (`ACT-PRD-008`, `P3-DEC-01`, `P3-DEC-06`, `P3-DEC-07`)**:
+   - **Authoritative Checkout Deadline & Canonicalization**: `automotive-operations` generates the single authoritative `expires_at` (`clock_timestamp() + INTERVAL '10 minutes'`) when persisting `checkout_attempt` and passes it to `POST /inventory/reservations`. `automotive-product` validates `clock_timestamp() < expires_at <= clock_timestamp() + INTERVAL '10 minutes 5 seconds'` (clock-skew guard; delayed expired RPCs fail closed with `409 CHECKOUT_DEADLINE_EXPIRED`; attempts to exceed 10 minutes fail with `422 INVALID_EXPIRATION_DEADLINE`) and **preserves** that exact `expires_at` without extending it. Lines are normalized by summing duplicate `physical_product_id` quantities (reject `<= 0` or overflow with `422`), sorted ascending by UUID, and hashed into `canonical_request_hash = SHA256("v1|" + store_id + "|" + checkout_attempt_id + "|" + expires_at_iso + "|" + sorted_lines)`.
+   - **Exact Transaction Order (Single Local PostgreSQL TX, `READ COMMITTED` + deterministic `FOR UPDATE`, bounded retry up to 3 attempts on SQLSTATE `40P01`/`40001` without changing `idempotency_key`)**:
+     1. **Atomic Idempotency Claim First (Before Any Inventory Mutation)**:
+        ```sql
+        INSERT INTO automotive_product.stock_reservation_group (
+            store_id, checkout_attempt_id, idempotency_key,
+            canonical_request_hash, status, expires_at
+        )
+        VALUES (
+            :store_id, :checkout_attempt_id, :idempotency_key,
+            :canonical_request_hash, 'HELD', :expires_at
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id;
+        ```
+        - If `0` rows returned (conflict on `uq_res_group_idempotency (store_id, idempotency_key)` OR `uq_res_group_checkout_attempt (checkout_attempt_id)`):
+          - Lookup by `(store_id, idempotency_key)`: if found with matching `canonical_request_hash`, replay persisted group + lines (even if expired/released/cancelled—never resurrect); if found with differing `canonical_request_hash`, abort and return `409 IDEMPOTENCY_PAYLOAD_MISMATCH`.
+          - Otherwise lookup by `checkout_attempt_id`: if found (different `idempotency_key` for the same attempt), abort and return `409 CHECKOUT_ATTEMPT_RESERVATION_CONFLICT`.
+          - *(Concurrent first-use race: PostgreSQL blocks the second `INSERT` until the first TX commits or rolls back. If the first commits, the second's `ON CONFLICT DO NOTHING` returns 0 rows and reads the committed outcome; if the first rolls back, the second acquires the claim and evaluates current ATP.)*
+     2. **Lock All Requested `store_inventory` Rows in Deterministic UUID Order**:
+        ```sql
+        SELECT id, physical_product_id, quantity_on_hand, quantity_reserved, quantity_allocated
+        FROM automotive_product.store_inventory
+        WHERE store_id = :store_id
+          AND physical_product_id = ANY(:sorted_product_ids)
+        ORDER BY physical_product_id ASC
+        FOR UPDATE;
+        ```
+     3. **Validate All Rows & Quantities**: Verify every requested `physical_product_id` exists and `ATP >= requested_quantity`. If any row is missing or short, **`ROLLBACK` the entire transaction** (including the claimed `stock_reservation_group` row — zero partial stock mutations, zero orphan holds, zero outbox events) and return `409 INSUFFICIENT_STOCK` with per-line diagnostics scoped strictly to `:store_id`.
+     4. **Update All `store_inventory` Counters**: Execute guarded conditional update per sorted line and assert `affected_rows = 1` for every line:
+        ```sql
+        UPDATE automotive_product.store_inventory
+        SET quantity_reserved = quantity_reserved + :req_qty,
+            version = version + 1,
+            updated_at = clock_timestamp()
+        WHERE store_id = :store_id
+          AND physical_product_id = :physical_product_id
+          AND (quantity_on_hand - quantity_reserved - quantity_allocated) >= :req_qty;
+        ```
+     5. **Insert Lines & Outbox, then `COMMIT`**: Insert all `stock_reservation_line` rows (`status = 'HELD'`, `held_quantity = requested_quantity`) and local `outbox_event` (`StockReservationHeldEvent`); `COMMIT`.
+   - **Note on Deadlocks (`INV-10`)**: Deterministic lock ordering reduces multi-SKU deadlock cycles, but does **not** claim to eliminate all deadlocks across unrelated queries/workers; therefore transactions stay short and retry SQLSTATE `40P01`/`40001` up to 3 times with jittered backoff.
+
+4. **Part 3 Guarded State Transitions & Multi-Line Operation Idempotency (`INV-05`–`INV-09`, `INV-13`, `INV-16`)**:
+   - **Confirm Allocation (`HELD -> ALLOCATED`, `ACT-PRD-009`)**: Locks group (`FOR UPDATE`) + sorted `store_inventory` rows; requires `status = 'HELD' AND expires_at > clock_timestamp()`. If `status IN ('EXPIRED', 'RELEASED')` or `expires_at <= clock_timestamp()`, **do not resurrect or allocate**—return `409 RESERVATION_EXPIRED` for Part 6 reconciliation. Otherwise, atomically update `store_inventory` (`quantity_reserved = quantity_reserved - req_qty`, `quantity_allocated = quantity_allocated + req_qty`, `on_hand` unchanged), update lines + group to `ALLOCATED` (`affected_rows = 1` required), and insert `StockAllocationConfirmedEvent` into `outbox_event`.
+   - **Expire / Release (`HELD -> EXPIRED | RELEASED`, `ACT-PRD-010`, `ACT-PRD-019`)**: Janitor (`FOR UPDATE SKIP LOCKED` on `status = 'HELD' AND expires_at <= clock_timestamp()`) and explicit cancel compete via guarded `WHERE status = 'HELD'` (`affected_rows = 1` required). Decrements `quantity_reserved` once only; `on_hand` unchanged.
+   - **Multi-Line / Single-Line Physical Handover or Shipping Dispatch (`ALLOCATED -> PARTIALLY_FULFILLED -> FULFILLED`, `ACT-PRD-031`)**:
+     - Claims `inventory_operation_batch(operation_id, request_hash)` first (`INSERT ... ON CONFLICT DO NOTHING RETURNING id`). Same `operation_id` + same `request_hash` replays the persisted batch + per-line results; same `operation_id` + different `request_hash` returns `409 IDEMPOTENCY_PAYLOAD_MISMATCH`.
+     - Normalizes and sorts requested lines by `physical_product_id` ASC, locks `stock_reservation_group` + `stock_reservation_line` rows (`status IN ('ALLOCATED', 'PARTIALLY_FULFILLED')`) + `store_inventory` rows in deterministic order, and validates `deliver_qty > 0 AND deliver_qty <= allocated_quantity` on every line (any failure rolls back the entire batch, including `inventory_operation_batch`).
+     - Atomically decrements `quantity_on_hand` and `quantity_allocated` by `deliver_qty` (`affected_rows = 1` per line), increments `fulfilled_quantity`, updates each line (`PARTIALLY_FULFILLED` or `FULFILLED`) and group status, and inserts one `inventory_operation` row per line under `batch_id`. Delivery acknowledgment (`shipped != delivered`) never decrements stock again.
+   - **Cancel Unfulfilled Allocation (`ALLOCATED | PARTIALLY_FULFILLED`, `ACT-PRD-010B`)**: Claims `inventory_operation_batch(operation_id, request_hash, operation_type = 'ALLOCATION_CANCEL')`, releases remaining `allocated_quantity` back to ATP (`quantity_allocated = quantity_allocated - rem_qty`, `on_hand` unchanged), sets `cancelled_quantity = cancelled_quantity + rem_qty` and `allocated_quantity = 0`. Lines with `fulfilled_quantity > 0` transition to `FULFILLED` (`requested = fulfilled + cancelled, allocated = 0`); lines with `fulfilled_quantity = 0` transition to `CANCELLED`. Group status updates per the aggregation invariant above.
+   - **Minimal Stock Adjustment (`ACT-PRD-014`)**: Claims `inventory_operation_batch(operation_id, request_hash, operation_type = 'STOCK_ADJUSTMENT')`, locks `store_inventory`, requires `quantity_on_hand + :delta >= 0 AND (quantity_on_hand + :delta - quantity_reserved - quantity_allocated) >= 0` (`affected_rows = 1`; rejects commitment breach with `409 ADJUSTMENT_BREACHES_COMMITMENTS`), and inserts one `inventory_operation` row.
 
 ---
 

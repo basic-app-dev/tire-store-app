@@ -17,9 +17,9 @@ Every piece of mutable business state has exactly one authoritative owning servi
 | **Store Service Price** | `automotive-product` | Catalog & Services | PostgreSQL | `(store_id, service_id)` (`price_cents` USD) | Operations, Web/Mobile | Strong Authoritative | Current Active (no price history) |
 | **Vehicle Configuration & Fitment** | `automotive-product` | Vehicle Fitment | PostgreSQL | `vehicle_configuration` + category evidence tables | Identity, Web/Mobile | Strong Authoritative | Permanent Reference |
 | **Branch Inventory Balance** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` | Operations, Web/Mobile | Strong Authoritative | Permanent Active |
-| **Stock Reservation (Hold)** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`reservation_id`) | Operations (Checkout Saga) | Local ACID | 15m TTL / Janitor Purge |
-| **Confirmed Allocation** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` counter | Operations, Fulfillment | Local ACID | Until Handover |
-| **Physical Stock Movement** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`movement_id`) | Staff, Audit, Accounting | Immutable Append-Only | 7 Years (Partitioned) |
+| **Stock Reservation (Hold)** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`stock_reservation_group.id`, `stock_reservation_line.id`) | Operations (Checkout Entry) | Local ACID | 10m TTL (`P3-DEC-07`) / Janitor Purge |
+| **Confirmed Allocation** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` counter + line | Operations, Fulfillment | Local ACID | Until Partial/Full Handover |
+| **Inventory Operation Audit** | `automotive-product` | Branch Inventory | PostgreSQL (Unpartitioned) | UUID (`inventory_operation.operation_id`) | Staff, Audit | Immutable Exactly-Once | Operational Audit (`stock_movements` / transfers / quarantine `DEFERRED_BY_OWNER_V1`) |
 | **Active Shopping Cart** | `automotive-operations`| Cart & Checkout | Redis String JSON | UUID (`cart_id`) | Web, Mobile, Operations | In-Memory / Optimistic | 7-day TTL (Auth) / 48h (Guest) |
 | **Commercial Order** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_id`) | Customer, Staff, Accounting | Local ACID | 7 Years (Permanent) |
 | **Order Line Snapshot** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_line_id`) | Customer, Workshop, Invoicing| Immutable Snapshot | 7 Years |

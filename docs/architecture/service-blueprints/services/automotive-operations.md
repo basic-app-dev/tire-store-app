@@ -121,8 +121,8 @@ Work Order State Machine:
 - **Algorithm**: Reads cart from Redis; calls `automotive-product` batch endpoint `/inventory/balances:batch` and `/catalog/prices:batch`; flags items where price or availability changed.
 - **SLO Target**: p95 < 40 ms.
 
-#### ACT-OPS-002: Submit Checkout Session (Master Saga Initiation & Partition Coordination)
-- **Business Purpose**: Initiates an immutable, distributed Checkout Saga for a specific store partition without locking unrelated store items.
+#### ACT-OPS-002: Create / Enter Checkout Session (Checkout-Entry 10m Stock Hold — `P3-DEC-07`)
+- **Business Purpose**: Creates a durable, store-scoped `checkout_attempt` and immediately acquires an atomic **10-minute** physical stock reservation in `automotive-product` before presenting a payment-ready checkout. *(Supersedes `COR-DIR-04` Place-Order-only stock hold; adding to cart still NEVER reserves stock.)*
 - **HTTP Method & Path**: `POST /api/v1/automotive/operations/checkout/sessions` (Visibility: CUSTOMER)
 - **Request Headers**: `Idempotency-Key: {uuid}`, `Authorization: Bearer {jwt}`
 - **Request Body**:
@@ -138,31 +138,22 @@ Work Order State Machine:
     }
   }
   ```
-- **Response**: `201 Created`
+- **Response**: `201 Created` (or `200 OK` on refresh / replay of active attempt)
   ```json
   {
     "order_id": "ord-20261123-0091",
     "checkout_attempt_id": "att-8877-6655",
-    "status": "PENDING_PAYMENT",
-    "stripe_client_secret": "pi_3MtwBwLkdIwHu7ix28a3tqPa_secret_YrKJWePBsNW",
-    "expires_at": "2026-11-23T23:15:00Z"
+    "reservation_group_id": "grp-9988-7766-5544-33221100aabb",
+    "status": "HOLDS_ACQUIRED",
+    "expires_at": "2026-11-26T18:10:00Z"
   }
   ```
-- **Durable PostgreSQL Coordination & Partition-Level Locking**:
-  1. *Cart Partition Isolation*: Redis lock is acquired strictly on the target store partition (`cart:{cart_id}:store:{store_id}:locked` with token `attempt_id` and 15m lease). Other store partitions in the same cart (e.g., Store B) remain completely mutable.
-  2. *Immutable PostgreSQL Attempt Snapshot*: Inside a local ACID transaction, `automotive-operations`:
-     - Inserts `checkout_attempt` recording `attempt_id`, `cart_id`, `cart_version`, `store_id`, `idempotency_key`, `status = PENDING_AUTHORIZATION`, and `expires_at`.
-     - Freezes an immutable snapshot of line items and computed pricing into `orders` (status `PENDING_PAYMENT`) and `order_items`.
-     - Creates `checkout_saga_instance` linked to the order.
-     - Commits the local PostgreSQL transaction.
-     - *Design Principle*: Even if Redis crashes, evicts, or loses its partition lock, PostgreSQL remains the unyielding authority preventing duplicate checkouts or stale cart snapshots.
-  3. *Downstream Saga Execution*:
-     - Synchronously calls `automotive-product` (`POST /inventory/reservations`) to acquire hard stock reservation.
-     - Synchronously calls `store-management` (`POST /stores/bays/reservations`) to acquire temporary bay hold.
-     - Creates Stripe `PaymentIntent` pre-authorization intent with 15-minute expiration matching hold lease.
-  4. *Safe Lock Release & Cleanup*:
-     - When payment succeeds, Redis partition lock is released safely via Lua script verifying token ownership (`if redis.call("get", KEYS[1]) == ARGV[1] then redis.call("del", KEYS[1]) end`). Paid items are removed from the Redis cart document; remaining store partitions persist.
-- **Failure Recovery**: If any downstream hold fails or times out, saga invokes reverse compensations, marks `checkout_attempt` `FAILED`, and safely releases the partition lock. | SLO: < 120 ms.
+- **Durable PostgreSQL Coordination, Refresh & Recovery (`P3-DEC-07`)**:
+  1. *Cart Partition Isolation*: Redis lock is acquired strictly on the target store partition (`cart:{cart_id}:store:{store_id}:locked` with token `attempt_id` and **10-minute** lease). Other store partitions in the same cart (e.g., Store B) remain completely mutable. Cart edits on Store A while a hold is active are rejected (`409 ACTIVE_CHECKOUT_HOLD_EXISTS`; require explicit cancel and new checkout attempt).
+  2. *Immutable PostgreSQL Attempt Snapshot*: Inside a local ACID transaction, `automotive-operations` generates the **single authoritative 10-minute deadline** `expires_at = clock_timestamp() + INTERVAL '10 minutes'`, inserts `checkout_attempt` (`status = INITIATED`, `expires_at`), snapshots `orders` / `order_items`, and creates `checkout_saga_instance`.
+  3. *Immediate Checkout-Entry Group Stock Hold*: Synchronously calls `automotive-product` (`POST /inventory/reservations`) passing `checkout_attempt_id`, deterministic `idempotency_key` (derived from `checkout_attempt_id`), the authoritative **`expires_at`**, and `PHYSICAL_PRODUCT` lines only (services never enter `store_inventory`). `automotive-product` validates and preserves that exact `expires_at` (never extending it by another 10 minutes); if the RPC was delayed past `expires_at`, `automotive-product` fails closed with `409 CHECKOUT_DEADLINE_EXPIRED`. Checkout UI advances to payment-ready only after group hold succeeds; on `409 INSUFFICIENT_STOCK`, marks `checkout_attempt = FAILED` and displays unavailable items before Place Order.
+  4. *Refresh / Lost-Response / Timeout Recovery*: Browser refresh calls `GET /checkout/sessions/{attemptId}` and returns the existing `checkout_attempt` + original `expires_at` (no new hold, no silent TTL extension). If `checkout_attempt` creation succeeded but the reservation RPC timed out or response was lost, retry/recovery re-uses the deterministic `idempotency_key` (`checkout_attempt_id`) to either retrieve the existing hold or fail closed.
+  5. *Bay Hold & Payment Deadline Boundary (Parts 5 & 6 — `INV-11`)*: `store-management` bay holds and Stripe payment authorization/capture orchestration must align with this 10-minute checkout-entry deadline in Parts 5 and 6; opening the checkout page does **not** capture funds. If payment status is uncertain at 10-minute expiry, Part 6 reconciliation applies safe fencing/void/refund before releasing or settling. | SLO: < 120 ms.
 
 #### ACT-OPS-003: Complete Payment & Capture (Stripe Webhook / Callback)
 - **Business Purpose**: Ingests Stripe payment confirmation, transitions order to `PAID`, confirms stock and bay holds, and creates work order.
@@ -281,7 +272,7 @@ stateDiagram-v2
     [*] --> INITIATED : Customer submits checkout (ACT-OPS-002)
     INITIATED --> PAYMENT_PENDING : Holds acquired; PaymentIntent created
     PAYMENT_PENDING --> AUTHORIZED : Webhook / Callback received (ACT-OPS-003)
-    PAYMENT_PENDING --> EXPIRED_UNAUTHORIZED : 15m hold lease elapsed; PaymentIntent cancelled
+    PAYMENT_PENDING --> EXPIRED_UNAUTHORIZED : 10m checkout-entry stock hold elapsed (Part 6 aligns payment/bay deadline)
     AUTHORIZED --> SETTLED : Check-in / Physical handover captures payment
     AUTHORIZED --> REFUNDED : Customer cancels order before fulfillment (ACT-OPS-007)
     PAYMENT_PENDING --> FAILED : Card declined / 3DS authentication failure
