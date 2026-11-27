@@ -9,8 +9,8 @@
 
 | Data Category | Primary Datastore | Operational TTL | Business Retention | Archival & Purge Mechanism |
 | :--- | :--- | :--- | :--- | :--- |
-| **Guest Shopping Carts** | Redis | 48 hours inactivity | None | Native Redis TTL expiration |
-| **User Shopping Carts** | Redis | 7 days inactivity | None | Native Redis TTL expiration |
+| **Guest Shopping Carts** | Redis | Retired in V1 (`P4-DEC-01`) | None | No anonymous/guest carts in V1; authentication required |
+| **Authenticated Account Carts** | Redis | 7 days inactivity (`cart:account:{user_id}`) | None | Native Redis TTL expiration refreshed on mutation; `cart:mut:{user_id}:{mutation_id}` dedupe TTL 24h |
 | **Stock Reservations (Holds)**| PostgreSQL | 10 minutes (`P3-DEC-07`) | 24 hours | `ReservationJanitorJob` marks EXPIRED; purged after 24h |
 | **Bay Reservations (Holds)** | PostgreSQL | 15 minutes *(pending Part 5/6 alignment)* | 24 hours | `BayReservationJanitorJob` marks RELEASED; purged after 24h |
 | **VIN Deposit Sales Holds** | PostgreSQL | 72 hours | 30 days | `VinHoldJanitorJob` releases hold; retained for deal history |

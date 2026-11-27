@@ -1,6 +1,6 @@
 # Architecture Decision Register (Root Index)
 
-> **Canonical Decision Authority**: The single master architecture decision register is [`service-blueprints/approved-decisions.md`](./service-blueprints/approved-decisions.md) (retaining `ADR-01`–`ADR-18`, Part 0 governance rules `GOV-01`–`GOV-05`, correction directions `COR-DIR-01`–`COR-DIR-10`, and finalized Part 1–3 decisions `P1-DEC`–`P3-DEC`, including the 2026-11-26 `P3-DEC-07` 10-minute checkout-entry stock hold superseding `COR-DIR-04`).
+> **Canonical Decision Authority**: The single master architecture decision register is [`service-blueprints/approved-decisions.md`](./service-blueprints/approved-decisions.md) (retaining `ADR-01`–`ADR-18`, Part 0 governance rules `GOV-01`–`GOV-05`, correction directions `COR-DIR-01`–`COR-DIR-10`, and finalized Part 1–4 decisions `P1-DEC`–`P4-DEC`, including `P3-DEC-07` 10-minute checkout-entry hold and `P4-DEC-01`/`P4-DEC-03`/`P4-DEC-04` authenticated Redis carts and unified multi-store checkout).
 > **Correction Remediation Tracker**: All 132 Round-2 audit findings across Parts 0–12 are tracked in [`service-blueprints/architecture-correction-register.md`](./service-blueprints/architecture-correction-register.md).
 > This root document preserves original technology/product scope decisions and open verification gates without creating a competing decision authority.
 

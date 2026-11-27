@@ -68,41 +68,44 @@ Prevent physical inventory overselling and phantom stock holds while supporting 
 
 ---
 
-## 3. Shopping Cart Architecture in Redis
+## 3. Shopping Cart Architecture in Redis (`P4-DEC-01`, `P4-DEC-02`, `P4-DEC-03`, `P4-DEC-06`)
 
 ### 3.1 The Problem
-Support high-throughput guest and authenticated cart interactions across Web and Mobile with minimal database load, guest-to-customer merging, item-level mutations, configurable automotive services, and multi-store awareness without prematurely reserving inventory.
+Support high-throughput authenticated cart interactions across Web, Android, and iOS with minimal database load, atomic multi-device concurrency, independent service purchases, and unified multi-store checkout without prematurely reserving inventory.
 
 ### 3.2 Competing Alternatives
 1. **Alternative A: PostgreSQL-Backed Cart**: Durable, relational, but high write amplification on frequent quantity increments/removals; pollutes relational database with abandoned sessions.
-2. **Alternative B: Redis Hash (`HSET cart:{id} {item_id} {item_json}`)**: Fast field-level operations, but lacks atomic validation of global cart-level invariants (such as total item count limits or multi-store grouping).
-3. **Alternative C (SELECTED): Redis String with JSON Serialization + Optimistic Cart Versioning**:
-   - The entire cart is stored under key `cart:{cart_id}` as a serialized JSON document with metadata (`version`, `store_id`, `updated_at`, `items[]`).
-   - Mutations use Redis Lua script or CAS (Check-And-Set via `WATCH` / optimistic version match) to verify `client_version == stored_version`.
-   - Cart TTL is refreshed on mutation (default: 7 days for authenticated users, 48 hours for guests).
-   - Redis persistence configuration: **Proposed AOF `appendfsync everysec`**, accepting a prospective 1-second loss window during host power failure in exchange for zero write stalls.
+2. **Alternative B: Redis Hash (`HSET cart:{id} {item_id} {item_json}`)**: Fast field-level operations, but lacks atomic validation of global cart-level invariants and mutation deduplication.
+3. **Alternative C (SELECTED — `P4-DEC-01`, `P4-DEC-02`, `P4-DEC-06`)**: **One Authenticated Account Cart (`cart:account:{user_id}`) + Atomic Redis Lua Mutations**:
+   - **No Guest Carts in V1**: Customers must authenticate via Keycloak OIDC before adding items; `user_id` is derived strictly from verified JWT `sub`.
+   - **Canonical Line Key**: `(store_id, item_type, item_id)` where `item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')`. Identical keys merge; services are independently purchasable without `linked_product_line_id` or vehicle IDs.
+   - **Atomic Lua Mutation + Deduplication**: Every mutation supplies `expected_version` and `mutation_id`. One Redis Lua script atomically checks `cart:mut:{user_id}:{mutation_id}`, replays if already applied, otherwise checks `cart.version == expected_version` (returning `409 CART_VERSION_CONFLICT` on mismatch), mutates, increments `version`, refreshes the 7-day TTL, and persists the mutation result.
+   - Redis persistence configuration: **Proposed AOF `appendfsync everysec`**.
 
-### 3.3 Multi-Store Cart Partitioning Algorithm
-1. Cart items track their candidate `store_id`.
-2. When the customer enters checkout, the Cart service checks:
-   $$\text{count}\Big(\text{distinct}\big(\text{items.map}(i \to i.store\_id)\big)\Big) \le 1$$
-3. If $> 1$, the checkout API **rejects single atomic order creation** with error `MULTI_STORE_CART_PARTITION_REQUIRED`.
-4. The client UI renders separate store checkout tabs. The customer explicitly authorizes each store order independently.
-5. Each store order triggers its own isolated Checkout Saga. No silent multi-order charging.
+### 3.3 Unified Multi-Store Checkout (`P4-DEC-03`, `P4-DEC-04` — Supersedes Single-Store Partitioning)
+1. One cart may contain items from Store A, Store B, and additional stores.
+2. Selecting Proceed to Checkout initiates **one unified checkout** (`checkout_attempt`), **one parent `orders` record**, and **one customer payment** covering all selected stores.
+3. Internal fulfillment is partitioned into `order_fulfillment_groups` (one per `store_id`), supporting independent pickup, installation, shipping, and partial fulfillment.
+4. Physical lines across all stores are reserved atomically in one `automotive-product` PostgreSQL transaction (`stock_reservation_group` + per-store `stock_reservation_line` rows locked in `(store_id ASC, physical_product_id ASC)` order). If any store has insufficient ATP, all holds roll back.
 
 ---
 
-## 4. Cart Invalidation & Stock Change Detection
+## 4. Cart Synchronization, Targeted SSE & Checkout Validation (`P4-DEC-07`, `P4-DEC-08`)
 
 ### 4.1 The Problem
-When catalog prices change or stock depletes while a customer has items in an active cart, the system must prevent checkouts against stale pricing/availability without overloading the database with polling.
+Keep multi-device carts and open cart views informed of cart edits, inventory changes, and price changes without polling storms, per-product RabbitMQ queue explosion, or relying on stale frontend caches at checkout.
 
-### 4.2 Competing Alternatives & Recommended Strategy
-1. **Rejected: Eager Cart Reverse-Indexing**: Writing to thousands of Redis cart keys whenever a catalog price changes creates huge write amplification and locks Redis during mass SKU updates.
-2. **Rejected: Blind Periodic Polling**: 10,000 active browser tabs polling `/validate` every 5 seconds would produce 2,000 RPS on inventory and catalog databases.
-3. **SELECTED: Multi-Tiered Batched Revalidation + TanStack Query Invalidation**:
-   - **Tier 1 (Browse / Focus)**: On window focus or route transition to `/cart`, the web/mobile client issues a lightweight `POST /api/v1/automotive/operations/cart/{id}/validate` with current item IDs, quantities, and cached prices.
-   - **Tier 2 (Pre-Checkout Gate)**: The Checkout Saga performs mandatory, blocking stock hold and price re-verification. If a mismatch is detected, the checkout aborts with `PRICE_CHANGED` or `INSUFFICIENT_STOCK`, returning the updated item status.
+### 4.2 Targeted SSE + Multi-Replica Fan-Out + Authoritative Validation
+1. **Rejected: Eager Persistent Cart Reverse-Indexing** or **Per-Product RabbitMQ Queues/Topics**: Maintaining persistent cart-to-product indexes or creating a RabbitMQ queue per product/store/user causes unbounded broker/storage overhead.
+2. **Rejected: Single Competing-Consumer Queue for SSE**: In a multi-replica Kubernetes deployment, a competing-consumer queue delivers an event to only *one* `automotive-operations` pod, missing active SSE connections on other pods.
+3. **SELECTED (`P4-DEC-07`)**: **One Authenticated SSE Stream + Per-Pod In-Memory Active-Subscription Inverted Indexes + Shared Fan-Out**:
+   - Each `automotive-operations` pod maintains in-memory inverted indexes **strictly for currently open authenticated SSE connections** on that pod:
+     - `user_id -> active connections` (`CART_UPDATED`)
+     - `(store_id, physical_product_id) -> active connections` (`INVENTORY_AVAILABILITY_CHANGED`)
+     - `physical_product_id -> active connections` (`PHYSICAL_PRODUCT_PRICE_CHANGED`)
+     - `(store_id, service_id) -> active connections` (`STORE_SERVICE_PRICE_CHANGED`)
+   - **Multi-Replica Fan-Out & Index Consistency**: `automotive-product` publishes domain events to `tirestore.events` (Part 1 Outbox); each `automotive-operations` pod binds an **ephemeral exclusive auto-delete RabbitMQ queue** to `tirestore.events` (for product/inventory/price signals) and subscribes to a lightweight **Redis Pub/Sub channel** (`sse:cart:user-updates`) for `CART_UPDATED` signals. When `CART_UPDATED {user_id, version}` arrives on another pod with locally connected emitters for `user_id` and `version > applied_cart_version[user_id]`, that pod reads `cart:account:{user_id}` from Redis, refreshes its local inverted indexes (`O(items)`), and emits `CART_UPDATED` (ignoring out-of-order versions; pods with 0 local connections for `user_id` ignore the signal). Missed Pub/Sub messages are recovered on SSE reconnect (`Last-Event-ID`) and client focus (`GET /cart` + `POST /cart/validate`), and disconnect/expiry removes all emitter entries.
+   - **Reconnect & Authority (`P4-DEC-08`)**: SSE is informational only (never an inventory correctness guarantee). Reconnect, page focus, and Proceed to Checkout perform authoritative REST recovery (`GET /cart`, `POST /catalog/prices:batch`, and atomic multi-store `POST /inventory/reservations`).
 
 ---
 

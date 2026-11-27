@@ -25,31 +25,32 @@ automotive-operations (Port 8091)
 
 ## 2. Business Entities & State Machine Transitions
 
-### 2.1 Core Entities Owned
-1. `cart` (Redis String JSON): `cart_id`, `version`, `store_id`, `updated_at`, `items[]`.
-2. `order_record` (PostgreSQL): `id`, `order_number`, `customer_id`, `store_id`, `status`, `total_amount_cents`, `currency`, `created_at`.
-3. `order_line_item` (PostgreSQL): `id`, `order_id`, `item_type` (`PHYSICAL_PRODUCT` | `SERVICE`), `physical_product_id` (nullable XOR), `service_id` (nullable XOR), `sku_code`, `description`, `quantity`, `unit_price_cents`, `booking_status`.
-4. `checkout_attempt` (PostgreSQL): `id`, `cart_id`, `cart_version`, `customer_id`, `store_id`, `idempotency_key`, `payment_intent_id`, `status` (`INITIATED`, `HOLDS_ACQUIRED`, `PAYMENT_PENDING`, `AUTHORIZED`, `SETTLED`, `COMPLETED`, `EXPIRED`, `FAILED`, `CANCELLED`), `expires_at`, `created_at`.
-   - *Lifecycle-Wide Uniqueness (Partial Unique Index)*: Enforced via PostgreSQL index:
+### 2.1 Core Entities Owned (`P4-DEC-01`–`P4-DEC-09`)
+
+1. `cart` (Redis String JSON at `cart:account:{user_id}`): `cart_id`, `user_id` (from JWT `sub`), `version`, `updated_at`, `items[]` keyed by `(store_id, item_type, item_id)` (`7-day` TTL; no guest carts in V1).
+2. `order_record` (PostgreSQL `orders`): `id`, `order_number`, `customer_id`, `cart_id`, `cart_version`, `status`, `subtotal_cents`, `tax_cents`, `total_amount_cents`, `currency` (`USD`), `created_at` (one parent order across all selected stores).
+3. `order_fulfillment_group` (PostgreSQL `order_fulfillment_groups`): `id`, `order_id`, `store_id`, `fulfillment_mode` (`PICKUP` | `INSTALLATION` | `SHIPPING` | `MIXED`), `status`, `pickup_pin_hash` (internal store partition; never creates separate customer orders or payments).
+4. `order_line_item` (PostgreSQL `order_items`): `id`, `order_id`, `fulfillment_group_id`, `store_id`, `item_type` (`PHYSICAL_PRODUCT` | `SERVICE`), `physical_product_id` (nullable XOR), `service_id` (nullable XOR), `sku_code`, `description`, `quantity`, `fulfilled_quantity`, `shipped_quantity`, `delivered_quantity`, `cancelled_quantity`, `unit_price_cents`, `booking_status`.
+5. `checkout_attempt` (PostgreSQL): `id`, `cart_id`, `cart_version`, `customer_id`, `idempotency_key`, `checkout_fencing_token`, `locked_keys` (`JSONB`), `reservation_group_id`, `payment_intent_id`, `status` (`INITIATED`, `HOLDS_ACQUIRED`, `PAYMENT_PENDING`, `AUTHORIZED`, `SETTLED`, `COMPLETED`, `EXPIRED_UNAUTHORIZED`, `FAILED`, `CANCELLED`), `expires_at` (`+10m`), `cart_cleaned_at`, `created_at`.
+   - _One Active Unified Checkout Per Customer_:
      ```sql
-     CREATE UNIQUE INDEX idx_uk_active_checkout_partition
-     ON checkout_attempt (customer_id, cart_id, store_id)
-     WHERE status IN ('INITIATED', 'HOLDS_ACQUIRED', 'PAYMENT_PENDING', 'AUTHORIZED');
+     CREATE UNIQUE INDEX idx_uk_active_checkout_customer
+     ON automotive_operations.checkout_attempt (customer_id)
+     WHERE status IN ('INITIATED', 'HOLDS_ACQUIRED', 'PAYMENT_PENDING', 'AUTHORIZED', 'SETTLED');
      ```
-     This mathematically guarantees that across all nonterminal checkout states, no customer device can initiate or process concurrent checkout attempts for the same store partition.
-   - *Payment Provider Mapping*: Enforced via PostgreSQL index:
+   - _Payment Provider Mapping_:
      ```sql
      CREATE UNIQUE INDEX idx_uk_payment_intent_active
-     ON checkout_attempt (payment_intent_id)
+     ON automotive_operations.checkout_attempt (payment_intent_id)
      WHERE payment_intent_id IS NOT NULL;
      ```
-     Guarantees strict 1:1 mapping between external Stripe PaymentIntent identifiers and local checkout attempts.
-5. `checkout_saga_instance` (PostgreSQL): `id`, `order_id`, `checkout_attempt_id`, `current_step`, `status`, `idempotency_key`, `stock_reservation_id`, `bay_reservation_id`, `payment_intent_id`, `updated_at`.
-5. `work_order` (PostgreSQL): `id`, `ticket_number`, `order_id`, `appointment_id`, `store_id`, `vehicle_vin`, `status`, `assigned_technician_id`, `created_at`.
-6. `work_order_task` (PostgreSQL): `id`, `work_order_id`, `service_item_id`, `task_name`, `status`, `sequence`, `notes`.
-7. `supplemental_quote` (PostgreSQL): `id`, `work_order_id`, `revision_number`, `status`, `total_cents`, `approval_token`, `approved_at`, `approved_by`.
+6. `checkout_saga_instance` (PostgreSQL): `id`, `order_id`, `checkout_attempt_id`, `current_step`, `status`, `idempotency_key`, `stock_reservation_id`, `bay_reservation_id`, `payment_intent_id`, `updated_at`.
+7. `work_order` (PostgreSQL): `id`, `ticket_number`, `order_id`, `appointment_id`, `store_id`, `vehicle_vin`, `status`, `assigned_technician_id`, `created_at`.
+8. `work_order_task` (PostgreSQL): `id`, `work_order_id`, `service_item_id`, `task_name`, `status`, `sequence`, `notes`.
+9. `supplemental_quote` (PostgreSQL): `id`, `work_order_id`, `revision_number`, `status`, `total_cents`, `approval_token`, `approved_at`, `approved_by`.
 
 ### 2.2 Order & Work Order State Machines
+
 ```text
 Order State Machine:
   [DRAFT] --> [PENDING_PAYMENT] --> [PAID] --> [PROCESSING] --> [FULFILLED]
@@ -70,92 +71,114 @@ Work Order State Machine:
 
 ### 3.1 Module 1: Cart & Checkout Module
 
-#### ACT-OPS-017: Add / Update Item in Active Cart (Redis)
-- **Business Purpose**: Allows anonymous and authenticated shoppers to mutate shopping cart items with immediate price estimation without locking database rows.
-- **Actor**: Customer (Guest / Authenticated)
-- **HTTP Method & Path**: `POST /api/v1/automotive/operations/cart/{id}/items` (Visibility: PUBLIC / CUSTOMER)
-- **Request Headers**: `X-Correlation-ID: {uuid}`, `Content-Type: application/json`
+#### ACT-OPS-017: Add / Update Item in Authenticated Account Cart (Redis Lua — `P4-DEC-01`, `P4-DEC-02`, `P4-DEC-06`)
+
+- **Business Purpose**: Mutates the authenticated customer's single account-level Redis cart (`cart:account:{user_id}`) across Web, Android, and iOS without locking database rows or reserving stock.
+- **Actor**: Authenticated Customer (`user_id` derived strictly from verified Keycloak JWT `sub`; never from request body or URL).
+- **HTTP Method & Path**: `POST /api/v1/automotive/operations/cart/items` (Visibility: CUSTOMER)
+- **Request Headers**: `Authorization: Bearer {jwt}`, `X-Correlation-ID: {uuid}`, `Content-Type: application/json`
 - **Request Body**:
   ```json
   {
-    "item_type": "PHYSICAL_PRODUCT",
-    "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
-    "quantity": 4,
+    "expected_version": 4,
+    "mutation_id": "mut-9f8e7d6c-5b4a-4321-8765-0123456789ab",
+    "operation": "UPSERT_QUANTITY",
     "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-    "selected_vehicle": { "year": 2022, "make": "Toyota", "model": "RAV4", "trim": "XLE" }
+    "item_type": "PHYSICAL_PRODUCT",
+    "item_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+    "quantity": 4
   }
   ```
-- **Response**: `200 OK`
+- **Response**: `200 OK` (or `409 CART_VERSION_CONFLICT` with current `version` if `expected_version` is stale)
   ```json
   {
     "cart_id": "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e",
-    "version": 3,
-    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "version": 5,
     "items_count": 4,
-    "subtotal_cents": 59996,
-    "estimated_tax_cents": 4799,
-    "total_cents": 64795
+    "advisory_subtotal_cents": 59996
   }
   ```
-- **Validation**: Quantity must be integer between 1 and 24; store_id must be valid UUID.
-- **Logical Algorithm**:
-  1. Retrieve JSON document at Redis key `cart:{id}`.
-  2. If absent, initialize empty cart with `version = 1`.
-  3. Find existing line item for SKU; update quantity or append new line item.
-  4. Recalculate cart subtotals and increment `version`.
-  5. Save to Redis using atomic `SET cart:{id} {json} EX 604800` (7-day TTL).
-- **Concurrency & Idempotency**: Redis atomic Lua script execution; client version verification.
+- **Atomic Redis Lua Algorithm**:
+  1. Check `cart:mut:{user_id}:{mutation_id}`: if present, return persisted response immediately without repeating mutation.
+  2. Initialize `cart:account:{user_id}` atomically via `SET NX` (`version = 0`) if absent.
+  3. Check `cart:checkout-lock:{user_id}`: if present and target `(store_id, item_type, item_id)` is in `locked_keys`, abort with `409 CART_LINE_LOCKED_BY_ACTIVE_CHECKOUT`. If `cart:checkout-lock:{user_id}` is absent/expired, check PostgreSQL `checkout_attempt` (`idx_uk_active_checkout_customer`): if an active attempt (`INITIATED`..`SETTLED`) exists, rehydrate the Redis lock cache and reject `locked_keys` (`409`); unrelated keys remain mutable.
+  4. Verify `cart.version == expected_version` (else abort with `409 CART_VERSION_CONFLICT`).
+  5. Upsert or remove composite key `(store_id, item_type, item_id)` (`quantity` 1..24; services need no `linked_product_line_id` or vehicle ID).
+  6. Increment `version`, refresh `EX 604800` (7-day TTL), record result in `cart:mut:{user_id}:{mutation_id}` (TTL 24h), and publish lightweight `CART_UPDATED` signal to Redis Pub/Sub `sse:cart:user-updates`.
+- **Frontend Retry Rules**: Non-conflicting additive updates may retry _after_ refreshing `GET /cart`; destructive/ambiguous mutations (`REMOVE_LINE`, `SET_QUANTITY` on a line edited by another device) must not blindly replay without user confirmation.
 - **SLO Target**: p95 < 25 ms, Availability 99.95%.
 
-#### ACT-OPS-018: Merge Guest Cart into User Cart
-- **Business Purpose**: Reconciles anonymous session cart items into customer account upon login.
-- **HTTP Method & Path**: `POST /api/v1/automotive/operations/cart/merge` (Visibility: CUSTOMER)
-- **Request Body**: `{ "guest_cart_id": "c1a2b3c4-...", "target_user_id": "u9z8y7x6-..." }`
-- **Response**: `200 OK` with merged cart payload.
-- **Algorithm**: Loads both carts from Redis; merges unique SKUs; takes higher quantity on duplicates; writes merged user cart; deletes guest cart key.
-- **SLO Target**: p95 < 45 ms.
+#### ACT-OPS-018: Merge Guest Cart into User Cart (`RETIRED_IN_V1 — P4-DEC-01`)
 
-#### ACT-OPS-019: Revalidate Cart Stock and Pricing
-- **Business Purpose**: Pre-checkout validation checking price shifts and branch stock levels.
-- **HTTP Method & Path**: `POST /api/v1/automotive/operations/cart/{id}/validate` (Visibility: CUSTOMER)
-- **Algorithm**: Reads cart from Redis; calls `automotive-product` batch endpoint `/inventory/balances:batch` and `/catalog/prices:batch`; flags items where price or availability changed.
-- **SLO Target**: p95 < 40 ms.
+- **Status**: **RETIRED IN V1** (`P4-DEC-01`: customers must authenticate before adding items; no guest carts or anonymous merge flows exist in V1; activity ID preserved without renumbering).
 
-#### ACT-OPS-002: Create / Enter Checkout Session (Checkout-Entry 10m Stock Hold — `P3-DEC-07`)
-- **Business Purpose**: Creates a durable, store-scoped `checkout_attempt` and immediately acquires an atomic **10-minute** physical stock reservation in `automotive-product` before presenting a payment-ready checkout. *(Supersedes `COR-DIR-04` Place-Order-only stock hold; adding to cart still NEVER reserves stock.)*
+#### ACT-OPS-019: Revalidate Cart & Targeted SSE Stream (`GET /events/stream` — `P4-DEC-07`, `P4-DEC-08`)
+
+- **REST Validation**: `POST /api/v1/automotive/operations/cart/validate` reads `cart:account:{user_id}`, batch-checks `automotive-product` (`/catalog/prices:batch` & `/inventory/balances:batch`), and returns advisory per-line status without mutating requested quantities.
+- **Targeted SSE Stream**: `GET /api/v1/automotive/operations/events/stream` (authenticated via JWT; max 5 concurrent streams/`user_id`, 15–30s heartbeat). Each `automotive-operations` pod maintains in-memory active-subscription inverted indexes (`user_id`, `(store_id, physical_product_id)`, `physical_product_id`, `(store_id, service_id)`) updated on cart open/mutation/disconnect. Pods receive `tirestore.events` via ephemeral per-pod exclusive RabbitMQ queues (no per-product queues/topics, no competing-consumer SSE miss) and `CART_UPDATED` via Redis Pub/Sub `sse:cart:user-updates`, coalescing high-frequency stock changes (250–500ms).
+  - _Cross-Replica Subscription Consistency_: When `CART_UPDATED {user_id, version}` arrives on Pod B from a mutation on Pod A, Pod B checks its local `user_id -> Set<SseEmitter>` index: if `0` local emitters exist, it ignores the message; if `>= 1` local emitters exist and `version > applied_cart_version[user_id]`, Pod B reads the authoritative `cart:account:{user_id}` from Redis, diffs its item keys to refresh its local `(store_id, physical_product_id)` / `physical_product_id` / `(store_id, service_id)` inverted indexes, updates `applied_cart_version[user_id]`, and emits `CART_UPDATED`. Out-of-order Pub/Sub messages (`version <= applied_cart_version`) are ignored. Missed Redis Pub/Sub messages are recovered on SSE reconnect (`Last-Event-ID`, rebuilding local inverted indexes from Redis) and client focus (`GET /cart` + `POST /cart/validate`); disconnect/timeout/JWT expiry removes all emitter entries from all four local indexes.
+
+#### ACT-OPS-002: Create / Enter Unified Multi-Store Checkout (`P4-DEC-03`, `P4-DEC-04`, `P4-DEC-05`, `P4-DEC-08`, `P4-DEC-09`)
+
+- **Business Purpose**: Validates the authenticated account's entire multi-store cart against `automotive-product`, creates one `checkout_attempt` + one parent `orders` record + per-store `order_fulfillment_groups`, and acquires an atomic **10-minute** multi-store physical stock reservation before presenting payment-ready checkout. _(Supersedes single-store checkout, `MULTI_STORE_CART_PARTITION_REQUIRED`, and `COR-DIR-04`.)_
 - **HTTP Method & Path**: `POST /api/v1/automotive/operations/checkout/sessions` (Visibility: CUSTOMER)
 - **Request Headers**: `Idempotency-Key: {uuid}`, `Authorization: Bearer {jwt}`
 - **Request Body**:
   ```json
   {
     "cart_id": "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e",
-    "cart_version": 4,
-    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-    "appointment_slot": {
-      "bay_id": "3a4b5c6d-7e8f-9a0b-1c2d-3e4f5a6b7c8d",
-      "start_time": "2026-11-25T14:00:00Z",
-      "end_time": "2026-11-25T15:00:00Z"
-    }
+    "cart_version": 6,
+    "approved_total_cents": 64994
   }
   ```
-- **Response**: `201 Created` (or `200 OK` on refresh / replay of active attempt)
+- **Response**: `201 Created` (or `200 OK` on refresh/replay of active attempt)
   ```json
   {
-    "order_id": "ord-20261123-0091",
+    "order_id": "ord-20261126-0091",
     "checkout_attempt_id": "att-8877-6655",
     "reservation_group_id": "grp-9988-7766-5544-33221100aabb",
     "status": "HOLDS_ACQUIRED",
-    "expires_at": "2026-11-26T18:10:00Z"
+    "expires_at": "2026-11-26T22:05:00Z",
+    "fulfillment_groups": [
+      { "store_id": "1a2b3c4d-...", "fulfillment_mode": "INSTALLATION", "subtotal_cents": 59996 },
+      { "store_id": "2b3c4d5e-...", "fulfillment_mode": "PICKUP", "subtotal_cents": 4998 }
+    ]
   }
   ```
-- **Durable PostgreSQL Coordination, Refresh & Recovery (`P3-DEC-07`)**:
-  1. *Cart Partition Isolation*: Redis lock is acquired strictly on the target store partition (`cart:{cart_id}:store:{store_id}:locked` with token `attempt_id` and **10-minute** lease). Other store partitions in the same cart (e.g., Store B) remain completely mutable. Cart edits on Store A while a hold is active are rejected (`409 ACTIVE_CHECKOUT_HOLD_EXISTS`; require explicit cancel and new checkout attempt).
-  2. *Immutable PostgreSQL Attempt Snapshot*: Inside a local ACID transaction, `automotive-operations` generates the **single authoritative 10-minute deadline** `expires_at = clock_timestamp() + INTERVAL '10 minutes'`, inserts `checkout_attempt` (`status = INITIATED`, `expires_at`), snapshots `orders` / `order_items`, and creates `checkout_saga_instance`.
-  3. *Immediate Checkout-Entry Group Stock Hold*: Synchronously calls `automotive-product` (`POST /inventory/reservations`) passing `checkout_attempt_id`, deterministic `idempotency_key` (derived from `checkout_attempt_id`), the authoritative **`expires_at`**, and `PHYSICAL_PRODUCT` lines only (services never enter `store_inventory`). `automotive-product` validates and preserves that exact `expires_at` (never extending it by another 10 minutes); if the RPC was delayed past `expires_at`, `automotive-product` fails closed with `409 CHECKOUT_DEADLINE_EXPIRED`. Checkout UI advances to payment-ready only after group hold succeeds; on `409 INSUFFICIENT_STOCK`, marks `checkout_attempt = FAILED` and displays unavailable items before Place Order.
-  4. *Refresh / Lost-Response / Timeout Recovery*: Browser refresh calls `GET /checkout/sessions/{attemptId}` and returns the existing `checkout_attempt` + original `expires_at` (no new hold, no silent TTL extension). If `checkout_attempt` creation succeeded but the reservation RPC timed out or response was lost, retry/recovery re-uses the deterministic `idempotency_key` (`checkout_attempt_id`) to either retrieve the existing hold or fail closed.
-  5. *Bay Hold & Payment Deadline Boundary (Parts 5 & 6 — `INV-11`)*: `store-management` bay holds and Stripe payment authorization/capture orchestration must align with this 10-minute checkout-entry deadline in Parts 5 and 6; opening the checkout page does **not** capture funds. If payment status is uncertain at 10-minute expiry, Part 6 reconciliation applies safe fencing/void/refund before releasing or settling. | SLO: < 120 ms.
+- **Backend Validation, Multi-Store Hold & Consistency**:
+  1. _Atomic Cart Version Freeze & Line Lock (`P4-DEC-08`, `P4-DEC-09`)_: Executes atomic Redis Lua script `CHECKOUT_FREEZE_AND_LOCK`: verifies `cart:account:{user_id}.version == request.cart_version` (if another device mutated the cart concurrently, returns **`409 CART_VERSION_CONFLICT`** with current `version` so the customer must refresh and re-approve), verifies no active checkout lock exists, sets `cart:checkout-lock:{user_id}` (fast-path cache TTL `900s`, with PostgreSQL `checkout_attempt` as authoritative lock source) locking all snapshot `locked_keys` with `checkout_fencing_token`, and returns the frozen snapshot.
+  2. _Authoritative Price/Status Check (`P4-DEC-08`)_: Calls `automotive-product` `POST /catalog/prices:batch` on the frozen snapshot to verify `is_active`, store service availability, and authoritative USD prices. If any price changed (`approved_total_cents` mismatch) or item is inactive/unoffered, runs token-fenced Lua unlock on `cart:checkout-lock:{user_id}` and returns `409 CHECKOUT_VALIDATION_FAILED` (`PRICE_CHANGED`, `PRODUCT_INACTIVE`, `SERVICE_NOT_OFFERED_AT_STORE`) without modifying cart quantities.
+  3. _One Active Checkout & Snapshot (`P4-DEC-03`, `P4-DEC-09`)_: Inserts `checkout_attempt` (`expires_at = clock_timestamp() + INTERVAL '10 minutes'`, `locked_keys`, `checkout_fencing_token`), `orders`, `order_fulfillment_groups` (1 per store), `order_items` (enforced by composite FK `fk_order_items_fulfillment_group`), and `checkout_saga_instance`. `idx_uk_active_checkout_customer` prevents concurrent checkouts across tabs/devices and keeps `locked_keys` protected through `AUTHORIZED`/`SETTLED`.
+  4. _Atomic Multi-Store Stock Hold (`P4-DEC-04`, `P4-DEC-05`)_: Calls `automotive-product` `POST /inventory/reservations` with all `PHYSICAL_PRODUCT` lines across all stores and the authoritative 10-minute `expires_at` (services never reserve inventory). On `409 INSUFFICIENT_STOCK` / `503 VALIDATION_UNCERTAIN` / `409 RESERVATION_CONFLICT`, marks `checkout_attempt = FAILED`, runs token-fenced Lua unlock on `cart:checkout-lock:{user_id}`, and preserves cart quantities.
+  5. _Refresh, Authorization, Cancel, Expiry & Fenced Cleanup (`P4-DEC-09`)_: `GET /checkout/sessions/{attemptId}` returns existing `expires_at` (no extension). When payment transitions `checkout_attempt` to `AUTHORIZED`/`SETTLED` (and stock hold confirms `ALLOCATED`), `cart:checkout-lock:{user_id}` is refreshed so async completion retains protection. On confirmed completion (even after Redis lock loss, pod restart, or a late callback after `T0+10m`), `CHECKOUT_COMPLETE_CLEANUP` reads `locked_keys` + `checkout_fencing_token` from **PostgreSQL `checkout_attempt`**, checks `cart:checkout-done:{attemptId}` / `cart_cleaned_at` (idempotent no-op on duplicate callbacks), removes **only** `locked_keys`, increments `cart.version`, preserves unrelated edits, and marks `COMPLETED`. Cancel (`ACT-OPS-005`) or genuine expiry (`EXPIRED_UNAUTHORIZED`) releases `stock_reservation_group` and runs token-fenced Lua unlock without deleting any cart items.
+  6. _Bay Hold & Payment Boundary (Parts 5 & 6)_: Detailed payment and bay Saga sequencing remain in Parts 5 and 6. | SLO: < 120 ms.
+
+- **Explicit Checkout Lifecycle & Cart-Protection Timeline**:
+  - **`T0` (Checkout Initiation):** Lua `CHECKOUT_FREEZE_AND_LOCK` verifies `cart.version`, writes Redis `cart:checkout-lock:{user_id}` (`900s` cache), and PostgreSQL persists `checkout_attempt` (`INITIATED -> HOLDS_ACQUIRED`, `expires_at = T0 + 10m`, `locked_keys`, `checkout_fencing_token`); `automotive-product` holds stock until `T0 + 10m`.
+  - **`T0 + 4m` (Concurrent Cart Activity):** Customer adds unrelated oil filter `(S1, P_FILTER)` → permitted (`version` advances). Another device attempts to edit locked `(S1, P_TIRE)` → rejected (`409 CART_LINE_LOCKED_BY_ACTIVE_CHECKOUT`), even if Redis lock cache was evicted (PG fallback rehydrates lock).
+  - **`T0 + 9m30s` (Payment Authorization):** Payment succeeds; `checkout_attempt` transitions `PAYMENT_PENDING -> AUTHORIZED` (`cart:checkout-lock:{user_id}` refreshed); `automotive-product` confirms `HELD -> ALLOCATED` before `T0 + 10m`.
+  - **`T0 + 10m00s` (10-Minute Stock-Hold Deadline):** Unconfirmed `HELD` stock reservations expire (`ReservationJanitorJob`) and unauthorized `checkout_attempt`s transition to `EXPIRED_UNAUTHORIZED` + unlock cart. Authorized/allocated attempts remain protected in `AUTHORIZED`/`SETTLED` without extending the 10m stock-hold rule.
+  - **`T0 + 10m15s` (Late Async Completion / Pod Restart Recovery):** Webhook or recovery job completes `checkout_attempt` (`SETTLED -> COMPLETED`), reads `locked_keys` + `fencing_token` from PostgreSQL, removes **only** `locked_keys` via `CHECKOUT_COMPLETE_CLEANUP` (leaving `(S1, P_FILTER)` intact), sets `cart:checkout-done:{attemptId}`, and records `cart_cleaned_at`. Duplicate callbacks are no-ops.
+
+#### Part 4 Technical Examples (`P4-DEC-01`–`P4-DEC-09`)
+
+1. **Add Physical Product**: Authenticated JWT (`sub=u9z8...`) calls `POST /cart/items` (`expected_version=0`, `store_id=S1`, `PHYSICAL_PRODUCT`, `P_TIRE`, `qty=4`) → initializes `cart:account:u9z8...` at `version=1`.
+2. **Add Independent Service**: Same customer adds `(store_id=S1, SERVICE, S_INSTALL_4, qty=1)` without any `linked_product_line_id` → `version=2`.
+3. **Same Physical Product at Two Stores**: Customer adds `(S1, PHYSICAL_PRODUCT, P_WIPER, qty=2)` (`version=3`) and `(S2, PHYSICAL_PRODUCT, P_WIPER, qty=2)` (`version=4`) — stored as two distinct composite keys.
+4. **Concurrent Laptop & Phone Mutations**: Laptop & Phone both read `version=5`. Laptop saves `(S1, P_TIRE, qty=4)` → `version=6`. Phone sends `expected_version=5` → receives `409 CART_VERSION_CONFLICT` (`current_version=6`), refreshes `GET /cart`, and retries with `expected_version=6` → saves `version=7`.
+5. **SSE Cross-Device Cart Visibility**: Laptop's `version=6` commit publishes `CART_UPDATED {cart_id, version: 6, mutation_id}` to `sse:cart:user-updates`; Phone's SSE stream (subscribed via `user_id -> SseEmitter`) receives it and refreshes `GET /cart`.
+6. **Targeted Inventory Availability Change**: `automotive-product` emits `InventoryAvailabilityChangedEvent` for `(S1, P_TIRE)` to `tirestore.events`; each `automotive-operations` pod checks its in-memory `(S1, P_TIRE) -> Set<SseEmitter>` index and notifies _only_ sessions currently viewing `(S1, P_TIRE)` (zero fan-out to unsubscribed users).
+7. **Global Physical vs. Store Service Price Change**: `PhysicalProductPriceChangedEvent` (`P_TIRE`) fans out via `P_TIRE -> Set<SseEmitter>`; `StoreServicePriceChangedEvent` (`S1, S_INSTALL_4`) fans out via `(S1, S_INSTALL_4) -> Set<SseEmitter>` (sessions viewing `S2` are untouched).
+8. **SSE Disconnect/Reconnect & REST Recovery**: Mobile client drops offline, misses events, reconnects SSE with `Last-Event-ID`, and immediately triggers `GET /cart` + `POST /cart/validate` to reconcile authoritative Redis/PostgreSQL state.
+9. **Unified Two-Store Checkout**: Cart has 4 tires at `S1` (`$149.99` each) + 2 wipers at `S2` (`$24.99` each). `POST /checkout/sessions` creates 1 `checkout_attempt` (`expires_at = T0 + 10m`), 1 `orders` (`total = $649.94 + tax`), 2 `order_fulfillment_groups` (`S1`, `S2`), and reserves both in 1 `stock_reservation_group`.
+10. **Atomic Multi-Store Rollback**: `S1` has `ATP=10` tires, `S2` has `ATP=1` wiper (requested 2). `automotive-product` locks `(S1, P_TIRE)` then `(S2, P_WIPER)`, detects `S2` shortage, rolls back the entire TX (`S1` stays `reserved=0`), and returns `409 INSUFFICIENT_STOCK`.
+11. **Successful Multi-Store Order & Fulfillment Groups**: Customer pays once on `orders` (`ord-1`); `S1` fulfillment group schedules `INSTALLATION` while `S2` fulfillment group dispatches `PICKUP` / `SHIPPING` independently.
+12. **Checkout Refresh, Expiry, Cancel & Stale Recovery**: Browser reload calls `GET /checkout/sessions/{attemptId}` and sees original `expires_at`; at `T0+10m`, `ReservationJanitorJob` expires all held lines across `S1` and `S2`; Cancel Checkout releases `stock_reservation_group` and clears fenced Redis lock.
+13. **Cart Mutation During Active Checkout & Fenced Snapshot Cleanup**: While `checkout_attempt` holds `(S1, P_TIRE)`, another device's attempt to edit `(S1, P_TIRE)` is rejected with `409 CART_LINE_LOCKED_BY_ACTIVE_CHECKOUT`, while adding an unrelated oil filter `(S1, P_FILTER, qty=1)` succeeds. When `ord-1` completes, token-fenced `CHECKOUT_COMPLETE_CLEANUP` removes only the locked snapshot keys (`(S1, P_TIRE)`), leaving `(S1, P_FILTER)` intact; duplicate completion callbacks hit `cart:checkout-done:{attemptId}` as a no-op. On cancel/expiry, token-fenced unlock releases `locked_keys` without losing any cart items.
+14. **Same-Key Retry & Fingerprint Mismatch**: Retrying `POST /inventory/reservations` with identical `idempotency_key` and `canonical_request_hash` replays `grp-1`; reusing `idempotency_key` with altered `S2` quantity returns `409 IDEMPOTENCY_PAYLOAD_MISMATCH`.
 
 #### ACT-OPS-003: Complete Payment & Capture (Stripe Webhook / Callback)
+
 - **Business Purpose**: Ingests Stripe payment confirmation, transitions order to `PAID`, confirms stock and bay holds, and creates work order.
 - **HTTP Method & Path**: `POST /api/v1/automotive/operations/checkout/webhook` (Visibility: INTERNAL / STRIPE)
 - **Algorithm**:
@@ -169,12 +192,14 @@ Work Order State Machine:
 - **SLO Target**: p95 < 180 ms.
 
 #### ACT-OPS-005: Compensate / Cancel Checkout Session
+
 - **Business Purpose**: Compensates downstream holds when checkout is abandoned or card declined.
 - **HTTP Method & Path**: `POST /api/v1/automotive/operations/checkout/{id}/cancel` (Visibility: CUSTOMER / SAGA)
 - **Algorithm**: Calls `DELETE /reservations/{id}` on product and `DELETE /bays/reservations/{id}` on store; marks saga `COMPENSATED`.
 - **SLO Target**: p95 < 90 ms.
 
 #### ACT-OPS-006: Reconcile Stale Checkout Sagas
+
 - **Business Purpose**: Background daemon identifying stuck saga instances (> 5m) and completing or compensating them.
 - **Trigger**: `@Scheduled(fixedDelay = 60000)` (`CheckoutSagaRecoveryJob`).
 - **Endpoint**: `NO HTTP ENDPOINT` (Internal Background Daemon).
@@ -185,34 +210,42 @@ Work Order State Machine:
 ### 3.2 Module 2: Order & Commercial Fulfillment Module
 
 #### ACT-OPS-001: Create Draft Order & Calculate Total
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/orders/draft` (Visibility: CUSTOMER)
 - **Summary**: Creates draft order; calculates taxes and line totals; snapshots MSRP prices. | SLO: < 60 ms.
 
 #### ACT-OPS-004: Get Order Commercial Details
+
 - **HTTP Route**: `GET /api/v1/automotive/operations/orders/{id}` (Visibility: CUSTOMER / STAFF)
 - **Summary**: Returns order line items, payment status, fulfillment type, and tracking. | SLO: < 30 ms.
 
 #### ACT-OPS-007: Cancel Order & Process Refund
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/orders/{id}/cancel` (Visibility: CUSTOMER / STAFF)
 - **Summary**: Issues Stripe refund; dispatches cancellation events; releases allocations. | SLO: < 150 ms.
 
 #### ACT-OPS-008: Ingest Payment Gateway Webhook
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/payments/webhook` (Visibility: INTERNAL / STRIPE)
 - **Summary**: Captures generic charge events, disputes, and refund acknowledgments. | SLO: < 80 ms.
 
 #### ACT-OPS-009: Query Customer Order History
+
 - **HTTP Route**: `GET /api/v1/automotive/operations/orders/customer/{id}` (Visibility: CUSTOMER)
 - **Summary**: Paginated order history for customer account portal. | SLO: < 40 ms.
 
 #### ACT-OPS-015: Issue Customer Pickup Handover PIN
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/orders/{id}/pickup-pin` (Visibility: INTERNAL)
 - **Summary**: Generates cryptographically secure 6-digit PIN; stores SHA-256 hash. | SLO: < 50 ms.
 
 #### ACT-OPS-016: Verify In-Store Pickup Handover PIN
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/fulfillment/verify-pin` (Visibility: STAFF)
 - **Summary**: Counter worker enters PIN; on match, triggers `ACT-PRD-031` stock handover. | SLO: < 55 ms.
 
 #### ACT-OPS-020: Initiate Walk-In Work Order
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/orders/walk-in` (Visibility: STAFF)
 - **Summary**: Opens an in-store commercial work ticket for drive-in customers without online orders. | SLO: < 75 ms.
 
@@ -221,34 +254,45 @@ Work Order State Machine:
 ### 3.3 Module 3: Work Order & Workshop Execution Module
 
 #### ACT-OPS-010: Create Work Order Ticket
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders` (Visibility: STAFF / SAGA)
 - **Summary**: Creates work order ticket bound to visit, vehicle VIN, and service tasks. | SLO: < 80 ms.
 
 #### ACT-OPS-011: Assign Technician to Work Order
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders/{id}/assign` (Visibility: STAFF)
 - **Summary**: Binds certified technician to work order and bay schedule. | SLO: < 45 ms.
 
 #### ACT-OPS-012: Update Work Order Task Status & Checklist
+
 - **HTTP Route**: `PATCH /api/v1/automotive/operations/work-orders/{id}/tasks/{taskId}` (Visibility: STAFF)
 - **Request Body**: `{ "status": "COMPLETED", "notes": "Torqued lugs to 100 ft-lb." }`
 - **Summary**: Updates task status with optimistic locking. | SLO: < 50 ms.
 
 #### ACT-OPS-013: Log Vehicle Inspection Findings
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders/{id}/inspection` (Visibility: STAFF)
 - **Summary**: Records tire tread depth, brake thickness, and suspension findings. | SLO: < 60 ms.
 
 #### ACT-OPS-014: Complete Work Order & Record Consumed Materials
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders/{id}/complete` (Visibility: STAFF)
 - **Summary**: Finalizes visit; deducts installed tires/parts via `ACT-PRD-031`. | SLO: < 90 ms.
 
 #### ACT-OPS-021: Generate Supplemental Repair Quote
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders/{id}/quotes` (Visibility: STAFF)
 - **Request Body**:
   ```json
   {
     "work_order_id": "wo-1122-3344",
     "items": [
-      { "item_id": "srv-brake-pad-repl", "description": "Front Brake Pad Replacement", "labor_cents": 8500, "parts_cents": 6500 }
+      {
+        "item_id": "srv-brake-pad-repl",
+        "description": "Front Brake Pad Replacement",
+        "labor_cents": 8500,
+        "parts_cents": 6500
+      }
     ]
   }
   ```
@@ -256,6 +300,7 @@ Work Order State Machine:
 - **Summary**: Creates versioned quote for additional repairs; dispatches SMS link. | SLO: < 90 ms.
 
 #### ACT-OPS-022: Customer Approves Quote Revision
+
 - **HTTP Route**: `POST /api/v1/automotive/operations/work-orders/{id}/quotes/{quoteId}/approve` (Visibility: CUSTOMER)
 - **Request Body**: `{ "approval_token": "sec_tok_8899aabb", "signature_name": "Phu Nguyen" }`
 - **Response**: `200 OK` (Tasks unlocked in work order).
@@ -281,14 +326,14 @@ stateDiagram-v2
 ```
 
 1. **Application Hold Leases vs. Stripe Authorization Behavior**:
-   - *Provider vs. Application Semantics*: In Stripe, a `PaymentIntent` in `requires_payment_method` or `requires_action` (3DS) does NOT automatically expire after 15 minutes (Stripe defaults to hours/days, or 7 days for authorized uncaptured funds). Therefore, the application's 15-minute checkout lease is an **application-level hold deadline**, NOT a guaranteed provider-side auto-cancellation.
-   - *Explicit Cancellation Fencing*: If authorization is not completed within the 15-minute application lease, `CheckoutSagaRecoveryJob` actively calls Stripe's API:
+   - _Provider vs. Application Semantics_: In Stripe, a `PaymentIntent` in `requires_payment_method` or `requires_action` (3DS) does NOT automatically expire after 15 minutes (Stripe defaults to hours/days, or 7 days for authorized uncaptured funds). Therefore, the application's 15-minute checkout lease is an **application-level hold deadline**, NOT a guaranteed provider-side auto-cancellation.
+   - _Explicit Cancellation Fencing_: If authorization is not completed within the 15-minute application lease, `CheckoutSagaRecoveryJob` actively calls Stripe's API:
      `POST https://api.stripe.com/v1/payment_intents/{id}/cancel` with cancellation reason `abandoned`.
-   - *Late Webhook Fencing & Provider State Semantics (Void vs. Refund)*:
+   - _Late Webhook Fencing & Provider State Semantics (Void vs. Refund)_:
      - In payment providers like Stripe, a charge cannot be refunded unless it was first captured. An authorization is merely a temporary hold on the cardholder's credit limit.
      - If a customer completes 3DS authorization at minute 16 while the application hold lease has already expired (`checkout_attempt` status is `EXPIRED_UNAUTHORIZED`), the application state machine rejects the late authorization.
-     - *Voiding Uncaptured Holds*: The webhook handler (`ACT-OPS-008`) checks the Stripe `PaymentIntent` status. If the status is `requires_capture`, it calls `POST /v1/payment_intents/{id}/cancel` to immediately **void and release the authorization hold**. It does NOT attempt a `/v1/refunds` API call, which would fail with a 400 error against an uncaptured intent.
-     - *Settled Charge Handling*: If the payment provider auto-captured or settlement occurred, the handler calls `/v1/refunds` with reason `fraudulent_or_expired_hold`, ensuring full reconciliation without inventory leakage.
+     - _Voiding Uncaptured Holds_: The webhook handler (`ACT-OPS-008`) checks the Stripe `PaymentIntent` status. If the status is `requires_capture`, it calls `POST /v1/payment_intents/{id}/cancel` to immediately **void and release the authorization hold**. It does NOT attempt a `/v1/refunds` API call, which would fail with a 400 error against an uncaptured intent.
+     - _Settled Charge Handling_: If the payment provider auto-captured or settlement occurred, the handler calls `/v1/refunds` with reason `fraudulent_or_expired_hold`, ensuring full reconciliation without inventory leakage.
 2. **Idempotent Webhook & Polling Dual-Reconciliation**:
    - `ACT-OPS-008` processes incoming Stripe webhooks (`payment_intent.succeeded`, `payment_intent.payment_failed`).
    - Every webhook event ID is recorded in `payment_webhook_log (event_id, processed_at)` with a unique constraint. Duplicate webhook deliveries return HTTP 200 OK without re-executing order confirmation.
@@ -298,6 +343,7 @@ stateDiagram-v2
    - `PaymentReconciliationWorker` polls uncertain payment transactions with exponential backoff (1m, 5m, 15m) querying Stripe until definitive resolution (`SETTLED` or `REFUNDED`), ensuring no customer is double-charged or denied refund.
 
 ## 4. Background Operations & Daemons
+
 1. **`CheckoutSagaRecoveryJob`** (`ACT-OPS-006`): Runs every 60 seconds; uses `FOR UPDATE SKIP LOCKED` to inspect sagas in `IN_PROGRESS` state over 5 minutes old; queries Stripe and downstream services to resume forward or compensate.
 2. **`TransactionalOutboxRelay`**: Runs every 500 ms (Part 1 default; does not guarantee delivery latency); polls `automotive_operations.outbox_event` (`status = 'PENDING'` or expired `CLAIMED` with `attempt_count < 12`) using `FOR UPDATE SKIP LOCKED` (batch 50, 60s lease); publishes to `tirestore.events` (`mandatory=true`, publisher confirms, 10s timeout); transitions to `PUBLISHED` (purged after 7 days) or `BLOCKED` after 12 claims/unroutable return. See [`events-and-projections.md`](../data-definitions/events-and-projections.md).
 3. **`AbandonedCartEvaluator`**: Runs hourly; scans inactive Redis carts older than 24 hours; triggers retention reminder events.

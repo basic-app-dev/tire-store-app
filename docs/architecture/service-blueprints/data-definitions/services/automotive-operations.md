@@ -13,7 +13,8 @@
 
 ```mermaid
 erDiagram
-    ORDER_RECORD ||--|{ ORDER_LINE_ITEM : contains
+    ORDER_RECORD ||--|{ ORDER_FULFILLMENT_GROUP : partitions
+    ORDER_FULFILLMENT_GROUP ||--|{ ORDER_LINE_ITEM : contains
     ORDER_RECORD ||--o| CHECKOUT_SAGA_INSTANCE : orchestrates
     ORDER_RECORD ||--o{ WORK_ORDER : initiates
     WORK_ORDER ||--|{ WORK_ORDER_TASK : includes
@@ -25,19 +26,28 @@ erDiagram
         uuid id PK
         varchar order_number UK
         uuid customer_id
-        uuid store_id
         varchar status
         integer total_amount_cents
         char currency
         timestamptz created_at
     }
 
+    ORDER_FULFILLMENT_GROUP {
+        uuid id PK
+        uuid order_id FK
+        uuid store_id
+        varchar fulfillment_mode
+        varchar status
+    }
+
     ORDER_LINE_ITEM {
         uuid id PK
         uuid order_id FK
-        uuid sellable_item_id
+        uuid fulfillment_group_id FK
+        uuid store_id
         varchar item_type
-        varchar sku_code
+        uuid physical_product_id
+        uuid service_id
         integer quantity
         integer unit_price_cents
         varchar booking_status
@@ -68,34 +78,52 @@ erDiagram
 
 ## 2. PostgreSQL Relational DDL Specifications
 
-### 2.1 Table: `orders`
+### 2.1 Tables: `orders` & `order_fulfillment_groups` (`P4-DEC-03` Multi-Store Parent Order)
+
 ```sql
 CREATE TABLE automotive_operations.orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_number VARCHAR(32) NOT NULL UNIQUE,
     customer_id UUID NOT NULL,
-    store_id UUID NOT NULL,
+    cart_id UUID NOT NULL,
+    cart_version INTEGER NOT NULL,
     status VARCHAR(32) NOT NULL,
     subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
     tax_cents INTEGER NOT NULL CHECK (tax_cents >= 0),
     total_amount_cents INTEGER NOT NULL CHECK (total_amount_cents >= 0),
     currency CHAR(3) NOT NULL DEFAULT 'USD',
     customer_email VARCHAR(255) NOT NULL,
-    pickup_pin_hash VARCHAR(64) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version INTEGER NOT NULL DEFAULT 1,
     CONSTRAINT chk_order_status CHECK (status IN (
         'DRAFT', 'PENDING_PAYMENT', 'PAID', 'PROCESSING',
-        'READY_FOR_PICKUP', 'FULFILLED', 'CANCELLED', 'REFUNDED'
+        'PARTIALLY_FULFILLED', 'FULFILLED', 'CANCELLED', 'REFUNDED'
     ))
 );
 
 CREATE INDEX idx_orders_customer ON automotive_operations.orders (customer_id, created_at DESC);
-CREATE INDEX idx_orders_store_status ON automotive_operations.orders (store_id, status, created_at DESC);
+
+CREATE TABLE automotive_operations.order_fulfillment_groups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL, -- Opaque reference to store-management store ID (NO cross-DB FK)
+    fulfillment_mode VARCHAR(24) NOT NULL DEFAULT 'MIXED'
+        CHECK (fulfillment_mode IN ('PICKUP', 'INSTALLATION', 'SHIPPING', 'MIXED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'READY_FOR_PICKUP', 'SCHEDULED', 'PARTIALLY_FULFILLED', 'FULFILLED', 'CANCELLED')),
+    pickup_pin_hash VARCHAR(64) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_order_fulfillment_store UNIQUE (order_id, store_id),
+    CONSTRAINT uq_fulfillment_group_id_order_store UNIQUE (id, order_id, store_id)
+);
+
+CREATE INDEX idx_fulfillment_groups_store_status ON automotive_operations.order_fulfillment_groups (store_id, status, created_at DESC);
 ```
 
 ### 2.2 Table: `order_items`
+
 ```sql
 CREATE TABLE automotive_operations.service_entitlements (
     redemption_token VARCHAR(128) PRIMARY KEY,
@@ -119,7 +147,9 @@ CREATE INDEX idx_entitlement_customer ON automotive_operations.service_entitleme
 
 CREATE TABLE automotive_operations.order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL,
+    fulfillment_group_id UUID NOT NULL,
+    store_id UUID NOT NULL,
     item_type VARCHAR(24) NOT NULL CHECK (item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')),
     physical_product_id UUID NULL, -- Opaque reference to automotive_product.physical_product(id); NO cross-DB FK
     service_id UUID NULL,          -- Opaque reference to automotive_product.service(id); NO cross-DB FK
@@ -144,24 +174,34 @@ CREATE TABLE automotive_operations.order_items (
     ),
     CONSTRAINT chk_item_booking_status CHECK (booking_status IN (
         'NOT_APPLICABLE', 'ENTITLED_UNSCHEDULED', 'SCHEDULED', 'COMPLETED'
-    ))
+    )),
+    CONSTRAINT fk_order_items_order FOREIGN KEY (order_id)
+        REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
+    CONSTRAINT fk_order_items_fulfillment_group FOREIGN KEY (fulfillment_group_id, order_id, store_id)
+        REFERENCES automotive_operations.order_fulfillment_groups(id, order_id, store_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX idx_order_items_order ON automotive_operations.order_items (order_id);
 ```
 
-### 2.2B Table: `checkout_attempt`
+- **Rejected Mismatch Example (`fk_order_items_fulfillment_group`)**: Suppose `order_fulfillment_groups` has row `fg-store-A` with `(id = fg-store-A, order_id = ord-1, store_id = Store A)`. Attempting `INSERT INTO automotive_operations.order_items (order_id, fulfillment_group_id, store_id, ...)` with `(ord-1, fg-store-A, Store B)` (or `(ord-2, fg-store-A, Store A)`) is rejected by PostgreSQL with SQLSTATE `23503` (`foreign_key_violation` on `fk_order_items_fulfillment_group`).
+
+### 2.2B Table: `checkout_attempt` (`P4-DEC-03`, `P4-DEC-05`, `P4-DEC-09`)
+
 ```sql
 CREATE TABLE automotive_operations.checkout_attempt (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     cart_id UUID NOT NULL,
     cart_version INTEGER NOT NULL,
-    customer_id UUID NOT NULL,
-    store_id UUID NOT NULL,
+    customer_id UUID NOT NULL, -- Derived strictly from verified JWT sub
     idempotency_key UUID NOT NULL,
+    checkout_fencing_token UUID NOT NULL DEFAULT gen_random_uuid(),
+    locked_keys JSONB NOT NULL DEFAULT '[]'::jsonb, -- Canonical snapshot keys protected until COMPLETED/FAILED/CANCELLED/EXPIRED_UNAUTHORIZED
+    reservation_group_id UUID NULL, -- Opaque reference to automotive_product.stock_reservation_group(id)
     payment_intent_id VARCHAR(128) NULL,
     status VARCHAR(32) NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL, -- Authoritative 10-minute stock-hold deadline (clock_timestamp() + INTERVAL '10 minutes')
+    cart_cleaned_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_checkout_attempt_status CHECK (status IN (
@@ -171,14 +211,14 @@ CREATE TABLE automotive_operations.checkout_attempt (
     ))
 );
 
--- Durable Idempotency Across Lifecycle: Preserves idempotent deduplication across both active and terminal attempts
+-- Durable Idempotency Across Lifecycle
 CREATE UNIQUE INDEX idx_uk_checkout_idempotency_global
 ON automotive_operations.checkout_attempt (customer_id, idempotency_key);
 
--- Lifecycle-Wide Nonterminal Uniqueness: Prevents duplicate active attempts for the same customer cart partition
-CREATE UNIQUE INDEX idx_uk_active_checkout_partition
-ON automotive_operations.checkout_attempt (customer_id, cart_id, store_id)
-WHERE status IN ('INITIATED', 'HOLDS_ACQUIRED', 'PAYMENT_PENDING', 'AUTHORIZED');
+-- One Active Unified Checkout Per Authenticated Customer (includes SETTLED until async cart cleanup finishes)
+CREATE UNIQUE INDEX idx_uk_active_checkout_customer
+ON automotive_operations.checkout_attempt (customer_id)
+WHERE status IN ('INITIATED', 'HOLDS_ACQUIRED', 'PAYMENT_PENDING', 'AUTHORIZED', 'SETTLED');
 
 -- Strict 1:1 mapping between external payment intent and checkout attempt
 CREATE UNIQUE INDEX idx_uk_payment_intent_active
@@ -187,6 +227,7 @@ WHERE payment_intent_id IS NOT NULL;
 ```
 
 ### 2.3 Table: `checkout_saga_instance`
+
 ```sql
 CREATE TABLE automotive_operations.checkout_saga_instance (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -208,6 +249,7 @@ WHERE status IN ('IN_PROGRESS', 'COMPENSATING');
 ```
 
 ### 2.4 Table: `work_orders` & `work_order_tasks`
+
 ```sql
 CREATE TABLE automotive_operations.work_orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -246,6 +288,7 @@ CREATE TABLE automotive_operations.work_order_tasks (
 ```
 
 ### 2.5 Table: `supplemental_quotes`
+
 ```sql
 CREATE TABLE automotive_operations.supplemental_quotes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -268,66 +311,83 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
 
 ---
 
-## 3. Redis Cart & Cache Data Modeling
+## 3. Redis Cart & Mutation Deduplication Modeling (`P4-DEC-01`, `P4-DEC-02`, `P4-DEC-06`, `P4-DEC-09`)
 
-### 3.1 Key Schema: Active Cart Document
-- **Key Pattern**: `cart:{cart_id}` (e.g., `cart:7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e`)
-- **Redis Type**: String (Serialized JSON)
-- **TTL**: 604,800 seconds (7 days for authenticated users) / 172,800 seconds (48 hours for guests). Refreshed on each mutation.
+### 3.1 Key Schema: Authenticated Account Cart Document
+
+- **Key Pattern**: `cart:account:{user_id}` (one logical cart per authenticated Keycloak `sub` UUID; zero guest carts or `user-cart` secondary pointer drift in V1).
+- **Redis Type**: String (Serialized JSON), initialized atomically via Lua `SET NX` on first authenticated mutation.
+- **TTL**: `604,800` seconds (7 days), refreshed on every successful mutation.
+- **Canonical Line Identity**: `(store_id, item_type, item_id)` where `item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')`. Identical composite keys merge quantities; services are independently purchasable without `linked_product_line_id` or `selected_vehicle`.
 - **Value JSON Structure**:
   ```json
   {
     "cart_id": "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e",
-    "version": 4,
     "user_id": "u9z8y7x6-5w4v-3u2t-1s0r-q9p8o7n6m5l4",
-    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "version": 4,
     "currency": "USD",
     "created_at": 1732400000,
     "updated_at": 1732400500,
     "items": [
       {
-        "line_id": "li-01",
+        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
         "item_type": "PHYSICAL_PRODUCT",
-        "physical_product_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
+        "item_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
         "sku_code": "MIC-DEF2-2256517",
         "title": "Michelin Defender 2 225/65R17",
         "quantity": 4,
-        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-        "unit_price_cents": 14999,
-        "selected_vehicle": { "year": 2022, "make": "Toyota", "model": "RAV4", "trim": "XLE" }
+        "advisory_unit_price_cents": 14999
       },
       {
-        "line_id": "li-02",
+        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
         "item_type": "SERVICE",
-        "service_id": "a1b2c3d4-0004-4000-8000-000000000004",
+        "item_id": "a1b2c3d4-0004-4000-8000-000000000004",
         "service_code": "INSTALL_4_WHEELS",
         "title": "Tire Mounting & Balancing (4-Wheel Package)",
         "quantity": 1,
-        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
-        "unit_price_cents": 8000,
-        "linked_product_line_id": "li-01"
+        "advisory_unit_price_cents": 8000
+      },
+      {
+        "store_id": "2b3c4d5e-6f7a-8b9c-0d1e-2f3a4b5c6d7e",
+        "item_type": "PHYSICAL_PRODUCT",
+        "item_id": "d5e6f7a8-9b0c-4d1e-8f2a-3b4c5d6e7f8a",
+        "sku_code": "BOSCH-ICON-18",
+        "title": "Bosch ICON 18-Inch Wiper Blade",
+        "quantity": 2,
+        "advisory_unit_price_cents": 2499
       }
     ]
   }
   ```
 
-### 3.2 Key Schema: User-to-Cart Mapping
-- **Key Pattern**: `user-cart:{user_id}`
-- **Redis Type**: String (Contains UUID of current active cart)
-- **TTL**: 604,800 seconds.
+### 3.2 Key Schema: Mutation Idempotency & Fenced Checkout Lock
+
+- **Mutation Dedupe Key**: `cart:mut:{user_id}:{mutation_id}` (Redis String JSON, TTL `86,400`s / 24h). Atomically checked and written inside the same Redis Lua script as `cart:account:{user_id}`:
+  1. If `cart:mut:{user_id}:{mutation_id}` exists → replay persisted result without re-applying.
+  2. Else verify `cart.version == expected_version` (if mismatch → return `409 CART_VERSION_CONFLICT` with current `version`).
+  3. Apply composite-key mutation, increment `version`, refresh 7-day TTL, and persist result in `cart:mut:{user_id}:{mutation_id}`.
+- **Fenced Checkout Lock Cache (`cart:checkout-lock:{user_id}`) & PostgreSQL Authority**:
+  - `cart:checkout-lock:{user_id}` is a **fast-path Redis cache** storing `{"checkout_attempt_id": "...", "fencing_token": "...", "snapshot_version": 6, "locked_keys": ["S1|PHYSICAL_PRODUCT|P_TIRE", "S2|PHYSICAL_PRODUCT|P_WIPER"], "expires_at": "..."}`. **PostgreSQL `checkout_attempt` (`status`, `locked_keys`, `checkout_fencing_token`, `expires_at`) is the authoritative lock source**—an expired or evicted Redis key never means checkout is finished.
+  - *Concurrent Checkout Freeze*: On `POST /checkout/sessions`, an atomic Redis Lua script checks `cart.version == request.cart_version` (else `409 CART_VERSION_CONFLICT`), verifies no active lock exists, writes `cart:checkout-lock:{user_id}` (bounded cache TTL `900s` so the fast-path cache outlives the 10m hold while `AUTHORIZED`/`SETTLED` completes asynchronously), and returns the frozen snapshot. `automotive-operations` then persists `checkout_attempt` (`expires_at = clock_timestamp() + INTERVAL '10 minutes'`, `locked_keys`, `checkout_fencing_token`) in PostgreSQL.
+  - *Active-Checkout Line Protection (Redis + PG Fallback)*: While `cart:checkout-lock:{user_id}` is present, `ACT-OPS-017` rejects mutations to `locked_keys` with `409 CART_LINE_LOCKED_BY_ACTIVE_CHECKOUT`. If `cart:checkout-lock:{user_id}` is **absent** (evicted or expired), `ACT-OPS-017` checks PostgreSQL `checkout_attempt` (`idx_uk_active_checkout_customer`): if an active attempt (`INITIATED`..`SETTLED`) exists, it rehydrates `cart:checkout-lock:{user_id}` and rejects `locked_keys` mutations (`409`); unrelated keys remain mutable.
+- **Safe Post-Checkout Snapshot Cleanup & Recovery (`P4-DEC-09`)**:
+  - *Completion Marker*: `cart:checkout-done:{checkout_attempt_id}` (TTL `86,400`s / 24h) + PostgreSQL `checkout_attempt.cart_cleaned_at`.
+  - *On `AUTHORIZED` / `SETTLED` & Completion*: Transitioning to `AUTHORIZED`/`SETTLED` refreshes `cart:checkout-lock:{user_id}` TTL so asynchronous completion callbacks retain protection. `CHECKOUT_COMPLETE_CLEANUP` reads `locked_keys` and `checkout_fencing_token` from **PostgreSQL `checkout_attempt`** (surviving Redis lock loss or pod restarts), checks `cart:checkout-done:{checkout_attempt_id}` / `cart_cleaned_at` (no-op on duplicate callbacks), runs token-fenced Lua to remove **only** `locked_keys` from `cart:account:{user_id}` (preserving later unrelated edits), increments `version`, deletes `cart:checkout-lock:{user_id}` if `fencing_token` matches, sets `cart:checkout-done:{checkout_attempt_id}`, and marks `checkout_attempt` `COMPLETED` (`cart_cleaned_at = clock_timestamp()`).
+  - *On `FAILED` / `CANCELLED` / `EXPIRED_UNAUTHORIZED`*: Once PostgreSQL `checkout_attempt` reaches a failed/cancelled/genuinely expired terminal state (and `stock_reservation_group` is released/expired), token-fenced Lua unlock (`if lock.fencing_token == :token then DEL cart:checkout-lock:{user_id}`) releases `locked_keys` **without deleting or altering any cart contents**. Stale callbacks with mismatched `fencing_token` are ignored as no-ops.
 
 ---
 
 ## 4. Local ACID Transaction Boundaries
 
-1. **Checkout Initiation (`ACT-OPS-002`)**:
-   `BEGIN` $	o$ Insert `orders` (status `PENDING_PAYMENT`) $	o$ Insert `order_items` (snapshot prices) $	o$ Insert `checkout_saga_instance` $	o$ Insert `outbox_event` $	o$ `COMMIT`. Remote HTTP calls to reserve stock and bays occur **outside** this SQL transaction.
+1. **Unified Multi-Store Checkout Initiation (`ACT-OPS-002`, `P4-DEC-03`, `P4-DEC-05`, `P4-DEC-08`)**:
+   `BEGIN` → Insert `checkout_attempt` (`expires_at = clock_timestamp() + INTERVAL '10 minutes'`, `checkout_fencing_token`) → Insert `orders` (`PENDING_PAYMENT`) → Insert `order_fulfillment_groups` (1 per `store_id`) → Insert `order_items` (bound to `fulfillment_group_id` + `store_id`) → Insert `checkout_saga_instance` → `COMMIT`. Authoritative price revalidation (`POST /catalog/prices:batch`) and atomic multi-store stock hold (`POST /inventory/reservations` passing `expires_at`) occur over HTTP **outside** this SQL transaction; any failure transitions `checkout_attempt` to `FAILED`.
 2. **Supplemental Quote Approval (`ACT-OPS-022`)**:
-   `BEGIN` $	o$ `SELECT * FROM supplemental_quotes WHERE id = :id FOR UPDATE` $	o$ Update quote status to `APPROVED` $	o$ Insert new `work_order_tasks` for authorized labor/parts $	o$ Insert `outbox_event` $	o$ `COMMIT`.
+   `BEGIN` → `SELECT * FROM supplemental_quotes WHERE id = :id FOR UPDATE` → Update quote status to `APPROVED` → Insert new `work_order_tasks` for authorized labor/parts → Insert `outbox_event` → `COMMIT`.
 
 ---
 
 ## Local Outbox & Consumer Inbox Tables (`automotive_operations`)
+
 - **Messaging Role**: **Producer & Consumer**
 - **Service-Owned Flyway Instantiation**: Instantiates both `automotive_operations.outbox_event` (produces `OrderConfirmedEvent`, `OrderCancelledEvent`, `QuoteApprovedEvent`, `WorkOrderCompletedEvent`) and `automotive_operations.consumer_inbox` (consumes `ProductPriceChangedEvent`, `StockAllocationConfirmedEvent`) via `backend/services/automotive-operations/src/main/resources/db/migration/V*.sql`.
 - **Canonical Schema Reference**: Follow the exact `outbox_event` / `consumer_inbox` DDL, T1/T2/T3 boundaries, and retry rules in [`../events-and-projections.md`](../events-and-projections.md) (no shared cross-service tables; DDL is instantiated in `automotive_operations` within `automotive_operations_db`).

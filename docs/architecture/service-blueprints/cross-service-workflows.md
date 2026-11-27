@@ -40,28 +40,26 @@ Master Business Workflows
   5. Search engine returns matching tires with MSRP and real-time branch availability.
 - **Activities Involved**: `ACT-PRD-003`, `ACT-PRD-004`, `ACT-PRD-001`, `ACT-IDN-005`.
 
-### WF-02: Shopping Cart Management & Multi-Tier Revalidation
-- **Trigger**: Customer adds tires, road hazard warranty, and installation services to cart.
+### WF-02: Authenticated Shopping Cart, Targeted SSE & Multi-Tier Revalidation (`P4-DEC-01`, `P4-DEC-06`, `P4-DEC-07`)
+- **Trigger**: Authenticated customer (Keycloak JWT `sub`) adds/updates items in `cart:account:{user_id}` or opens the cart view across Web/Android/iOS. *(Guest carts and `cart/merge` are retired in V1.)*
 - **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092).
 - **Sequence**:
-  1. Client calls `POST /api/v1/automotive/operations/cart/{id}/items` with `item_type` (`PHYSICAL_PRODUCT` | `SERVICE`), `physical_product_id` or `service_id`, `quantity`, and target `store_id`.
-  2. `automotive-operations` executes atomic Redis Lua script updating cart JSON document, returning updated totals.
-  3. Customer switches to browser tab or enters checkout: Client calls `POST /api/v1/automotive/operations/cart/{id}/validate`.
-  4. `automotive-operations` batch-checks inventory and price freshness against `automotive-product` (`POST /api/v1/automotive/products/inventory/balances:batch`).
-  5. If price or stock has changed, cart is flagged with `PRICE_CHANGED` or `INSUFFICIENT_STOCK` notices.
-- **Activities Involved**: `ACT-OPS-017`, `ACT-OPS-018`, `ACT-OPS-019`, `ACT-PRD-006`.
+  1. Client calls `POST /api/v1/automotive/operations/cart/items` with `expected_version`, `mutation_id`, and composite key `(store_id, item_type, item_id)` (`PHYSICAL_PRODUCT` or independent `SERVICE`).
+  2. `automotive-operations` executes atomic Redis Lua script (`cart:mut:{user_id}:{mutation_id}` dedupe + `version == expected_version` check) and publishes `CART_UPDATED` via Redis Pub/Sub `sse:cart:user-updates`.
+  3. Active authenticated SSE connections (`GET /events/stream`) receive `CART_UPDATED`, `INVENTORY_AVAILABILITY_CHANGED`, `PHYSICAL_PRODUCT_PRICE_CHANGED`, or `STORE_SERVICE_PRICE_CHANGED` via per-pod in-memory active-subscription inverted indexes (backed by ephemeral per-pod RabbitMQ queues bound to `tirestore.events`).
+  4. On reconnect, page focus, or `POST /cart/validate`, client fetches authoritative Redis cart and `automotive-product` batch prices/balances (`POST /catalog/prices:batch`, `POST /inventory/balances:batch`).
+- **Activities Involved**: `ACT-OPS-017`, `ACT-OPS-019`, `ACT-PRD-006`, `ACT-PRD-023`.
 
-### WF-03: Multi-Store Cart Detection & Partitioned Authorization
-- **Trigger**: Customer attempts checkout with items originating from two distinct physical stores.
-- **Participating Services**: `automotive-operations` (:8091).
+### WF-03: Unified Multi-Store Checkout & Internal Fulfillment Grouping (`P4-DEC-03`, `P4-DEC-04` — Supersedes Single-Store Partitioning)
+- **Trigger**: Authenticated customer selects Proceed to Checkout on a cart containing items from Store A, Store B, etc.
+- **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092).
 - **Sequence**:
-  1. Client calls `POST /api/v1/automotive/operations/checkout/sessions`.
-  2. Cart service checks store consistency across line items. Identifies Store A (Tires) and Store B (Wheels).
-  3. **Cart Service Rejects Single Order Creation**: Returns HTTP `422 Unprocessable Entity` with error code `MULTI_STORE_CART_PARTITION_REQUIRED` and grouped item metadata.
-  4. Web/Mobile UI partitions cart into Store A Tab and Store B Tab.
-  5. Customer explicitly reviews and authorizes Store A checkout (creating Order 1), then authorizes Store B checkout (creating Order 2).
-  6. **Invariant**: No silent or implicit multiple card charges. Each order has its own authorization, receipt, and Saga.
-- **Activities Involved**: `ACT-OPS-002`, `ACT-OPS-019`.
+  1. Client calls `POST /api/v1/automotive/operations/checkout/sessions` with `cart_id`, `cart_version`, and `approved_total_cents`. *(Previous `MULTI_STORE_CART_PARTITION_REQUIRED` 422 rejection is superseded.)*
+  2. `automotive-operations` reads `cart:account:{user_id}`, revalidates product/service status and authoritative USD prices (`POST /catalog/prices:batch`), and returns `409 CHECKOUT_VALIDATION_FAILED` if prices/availability changed so the customer can approve the updated total.
+  3. `automotive-operations` creates **one** `checkout_attempt` (`expires_at = +10m`), **one** parent `orders` record, **N** `order_fulfillment_groups` (one per `store_id`), and `order_items`.
+  4. `automotive-operations` calls `automotive-product` (`POST /inventory/reservations`) to atomically reserve all `PHYSICAL_PRODUCT` lines across all stores in one `stock_reservation_group` (`(store_id, physical_product_id)` lock order).
+  5. One customer payment covers the entire parent `orders` record; each store fulfillment group executes pickup, installation, or shipping independently.
+- **Activities Involved**: `ACT-OPS-002`, `ACT-PRD-008`, `ACT-PRD-023`.
 
 ---
 
@@ -83,9 +81,9 @@ sequenceDiagram
     participant Stripe as Stripe API
     participant Notif as notification (:8095)
 
-    Customer->>Ops: POST /checkout/sessions (Enter Checkout: Cart ID, Store #101)
-    Note over Ops: 1. Persist checkout_attempt (expires_at = +10m)<br/>Snapshot Order & Saga State
-    Ops->>Prod: POST /inventory/reservations (Group physical lines, Qty: 4, Store #101)
+    Customer->>Ops: POST /checkout/sessions (Enter Unified Multi-Store Checkout)
+    Note over Ops: 1. Persist checkout_attempt (expires_at = +10m)<br/>1 Parent Order + N Fulfillment Groups + Saga
+    Ops->>Prod: POST /inventory/reservations (Multi-store group physical lines, expires_at)
     Prod-->>Ops: 201 Created (ReservationGroup #G101, TTL: 10m)
     Note over Ops: Customer clicks Place Order/Pay (Part 5/6 align bay & payment deadline)
     Ops->>Store: POST /bays/reservations (Store #101, Bay #2, Slot)
