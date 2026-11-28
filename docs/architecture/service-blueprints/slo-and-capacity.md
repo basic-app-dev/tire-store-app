@@ -24,9 +24,8 @@ A single mixed checkout (`POST /checkout/sessions`) triggers an internal fan-out
 3. `automotive-operations` $\to$ `store-management` bay hold (1 write).
 4. `automotive-operations` $\to$ Stripe API payment intent (1 external call).
 5. Payment capture $\to$ `automotive-product` confirm allocation (1 write).
-6. Payment capture $\to$ `store-management` confirm bay (1 write).
-7. Payment capture $\to$ `appointment` create booking (1 write).
-8. Payment capture $\to$ Transactional outbox event insertion (1 local write).
+6. Payment capture $\to$ `store-management` confirm bay & appointment (1 local ACID write).
+7. Payment capture $\to$ Transactional outbox event insertion (1 local write).
 - **Amplification Factor**: $1\text{ external checkout} \approx 7\text{ internal synchronous/asynchronous operations}$.
 
 ---
@@ -42,7 +41,7 @@ A single mixed checkout (`POST /checkout/sessions`) triggers an internal fan-out
 
 ---
 
-## 3. Comprehensive Activity SLO Matrix (All 8 Services)
+## 3. Comprehensive Activity SLO Matrix (All 7 Target Services)
 
 | Activity ID | Activity Name | Tier | Read/Write | Peak RPS (50 Stores) | p95 Latency Target | Correctness Invariant |
 | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
@@ -105,10 +104,10 @@ All errors return `application/problem+json` containing `type`, `title`, `status
 | **`automotive-operations`** | `CheckoutSagaRecoveryJob`| Fixed delay 60s | PostgreSQL `SKIP LOCKED` | Recovers crashed sagas within 5m |
 | **All Producing Services** | `TransactionalOutboxRelay`| Fixed delay 500ms (Part 1 default) | PostgreSQL `SKIP LOCKED` (batch 50, 60s lease) | Publishes to `tirestore.events` with confirms (poll interval does not guarantee delivery latency) |
 | **`automotive-operations`** | `AbandonedCartEvaluator` | Cron hourly at :15 | Redis scan with cursor | Flags inactive carts $\ge 24\text{h}$ |
-| **`store-management`** | `BayReservationJanitorJob`| Fixed delay 60s | Atomic conditional delete | Releases unconfirmed bays within 60s |
+| **`store-management`** | `BayReservationJanitorJob`| Fixed delay 60s | PostgreSQL `SKIP LOCKED` + in-TX retirement | Expires 10m holds (`EXPIRED`) non-destructively (`P5-DEC-08`) |
 | **`store-management`** | `StoreHoursSyncJob` | Cron daily at 01:00 AM | Batch update projections | Freshness within 24h |
-| **`appointment`** | `AppointmentReminderJob` | Cron every 15m | Reads appointments next 24h | Dispatches alerts 24h & 2h prior |
-| **`appointment`** | `EntitlementExpiryJanitor`| Cron weekly Sunday 03:00 AM| Updates expired SCHEDULE_LATER | Transitions tokens > 365 days |
+| **`store-management`** *(formerly `appointment`)* | `AppointmentReminderJob` | Cron every 15m | Reads appointments next 24h | Dispatches alerts 24h & 2h prior |
+| **`store-management`** *(formerly `appointment`)* | `EntitlementExpiryJanitor`| Cron weekly Sunday 03:00 AM| Updates expired SCHEDULE_LATER | Transitions tokens > 365 days |
 | **`vehicle-product`** | `VinHoldJanitorJob` | Fixed delay 300s | Releases expired 72h holds | Frees vehicle for public sale |
 | **`vehicle-sales`** | `SalesDealJanitorJob` | Cron daily at 04:00 AM | Archives abandoned inquiries | Cleans stale draft deals > 30d |
 | **`notification`** | `NotificationRetryWorker` | RabbitMQ Backoff | Exponential backoff (1s, 5s, 30s) | Max 3 attempts before DLQ |

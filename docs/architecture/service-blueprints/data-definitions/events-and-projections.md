@@ -336,8 +336,11 @@ All events publish to durable topic exchange **`tirestore.events`** with explici
 | **`OrderCancelledEvent`** | `automotive-operations`| `order.commerce.cancelled` | `automotive-product` (`q.prd.order-cancelled`), `store-management` (`q.str.order-cancelled`), `notification` (`q.notif.order-cancelled`) | Customer cancel or saga compensation |
 | **`QuoteApprovedEvent`** | `automotive-operations`| `workshop.quote.approved` | `notification` (`q.notif.quote-approved`) | Customer authorized supplemental repairs |
 | **`WorkOrderCompletedEvent`** | `automotive-operations`| `workshop.order.completed` | `automotive-product` (`q.prd.wo-completed`), `notification` (`q.notif.wo-completed`) | Shop labor finished; parts consumed |
-| **`AppointmentConfirmedEvent`** | `appointment` | `appointment.booking.confirmed`| `notification` (`q.notif.appt-confirmed`), `store-management` (`q.str.appt-confirmed`) | Service bay booking finalized |
-| **`AppointmentRescheduledEvent`**| `appointment` | `appointment.booking.rescheduled`| `notification` (`q.notif.appt-rescheduled`), `store-management` (`q.str.appt-rescheduled`) | Booking moved to new bay / time slot |
+| **`AppointmentConfirmedEvent`** | `store-management` *(merged from `appointment`)* | `appointment.booking.confirmed`| `notification` (`q.notif.appt-confirmed`) | Service bay & appointment booking finalized |
+| **`AppointmentRescheduledEvent`**| `store-management` *(merged from `appointment`)* | `appointment.booking.rescheduled`| `notification` (`q.notif.appt-rescheduled`) | Booking moved to new bay / time slot |
+| **`AppointmentCancelledEvent`** | `store-management` *(merged from `appointment`)* | `appointment.booking.cancelled` | `notification` (`q.notif.appt-cancelled`), `automotive-operations` (`q.ops.appt-cancelled`) | Appointment cancelled (non-destructive) |
+| **`ServiceSlotAvailabilityChangedEvent`** | `store-management` | `slot.availability.changed` | `automotive-operations` (per-pod ephemeral SSE fan-out) | Bay hold/confirm/release/expiry/closure changed slot availability (`P5-DEC-09`) |
+| **`StoreClosureImpactedAppointmentsEvent`** | `store-management` | `store.closure.impacted` | `notification` (`q.notif.store-closure`) | Unexpected store closure flagged confirmed appointments for review (`P5-DEC-10`) |
 | **`VehicleDepositHeldEvent`** | `vehicle-sales` | `sales.vehicle.deposit_held` | `vehicle-product` (`q.vpr.deposit-held`), `notification` (`q.notif.deposit-held`) | Deposit collected; VIN held |
 | **`VehicleSoldEvent`** | `vehicle-sales` | `sales.vehicle.sold` | `vehicle-product` (`q.vpr.vehicle-sold`), `notification` (`q.notif.vehicle-sold`) | Contract executed; VIN marked SOLD |
 
@@ -367,8 +370,8 @@ To prevent high-latency synchronous RPC fan-outs across the API Gateway during b
 | Projection Target | Destination Service | Source Service | Copied Attributes | Synchronization Trigger | Stale Tolerance | Authoritative Authority |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Cart Product Display** | `automotive-operations` (Redis) | `automotive-product` | SKU name, brand, thumbnail URL, list price | Copied on item-add; revalidated on `/validate` | Max 24 hours | **NEVER authorizes checkout! Must revalidate.** |
-| **Service Duration Cache** | `appointment` (Local Memory/PG) | `automotive-product` | Service code, estimated duration, required bay type | Consumes `ServiceDefinitionChangedEvent` | Max 6 hours | Advisory for slot calculation; re-verified at bay hold. |
-| **Store Capability Projection**| `appointment` | `store-management` | Store ID, active bay count, alignment rack capability | Consumes `StoreOfferingChangedEvent` | Max 24 hours | Re-verified during bay reservation. |
+| **Service Duration Cache** | `store-management` *(merged from `appointment`)* | `automotive-product` | Service code, estimated duration, `requires_store_materials` | Consumes `ServiceDefinitionChangedEvent` | Max 6 hours | Advisory for slot calculation; re-verified at checkout/hold. |
+| **Store Capability Projection**| *(Removed — consolidated locally inside `store-management` per `P5-DEC-01`)* | `store-management` | — | Local ACID query | Zero staleness | Authoritative inside `store_management_db`. |
 | **Customer Garage Profile** | `automotive-operations` | `identity-access` | Vehicle ID, YMMT, license plate | Fetched on checkout initiation | Max 1 hour | Immutable snapshot on order. |
 
 ### Strict Projection Rules

@@ -82,11 +82,11 @@ Support high-throughput authenticated cart interactions across Web, Android, and
    - **Atomic Lua Mutation + Deduplication**: Every mutation supplies `expected_version` and `mutation_id`. One Redis Lua script atomically checks `cart:mut:{user_id}:{mutation_id}`, replays if already applied, otherwise checks `cart.version == expected_version` (returning `409 CART_VERSION_CONFLICT` on mismatch), mutates, increments `version`, refreshes the 7-day TTL, and persists the mutation result.
    - Redis persistence configuration: **Proposed AOF `appendfsync everysec`**.
 
-### 3.3 Unified Multi-Store Checkout (`P4-DEC-03`, `P4-DEC-04` — Supersedes Single-Store Partitioning)
-1. One cart may contain items from Store A, Store B, and additional stores.
-2. Selecting Proceed to Checkout initiates **one unified checkout** (`checkout_attempt`), **one parent `orders` record**, and **one customer payment** covering all selected stores.
-3. Internal fulfillment is partitioned into `order_fulfillment_groups` (one per `store_id`), supporting independent pickup, installation, shipping, and partial fulfillment.
-4. Physical lines across all stores are reserved atomically in one `automotive-product` PostgreSQL transaction (`stock_reservation_group` + per-store `stock_reservation_line` rows locked in `(store_id ASC, physical_product_id ASC)` order). If any store has insufficient ATP, all holds roll back.
+### 3.3 Mandatory Single-Store Cart & Single-Vehicle Service Rules (`P5-DEC-02`, `P5-DEC-03` — Supersedes Multi-Store Checkout)
+1. **Mandatory Store Selection**: Customers must select one `store_id` before browsing or adding items; `cart:account:{user_id}` carries one authoritative top-level `store_id` (`(item_type, item_id)` unique within that store).
+2. **Store-Switch Confirmation**: Switching stores with a populated cart requires explicit customer confirmation and an atomic version-checked cart-reset mutation (honoring active checkout locks; never silently transferring lines).
+3. **Single Vehicle for Services**: Physical-only carts require no vehicle. Adding the first `SERVICE` line requires selecting one vehicle; all service lines in that cart/order share that single vehicle (`selected_vehicle` snapshot).
+4. **Unified Single-Store Order & Atomic Hold**: One cart, one `checkout_attempt`, one `orders` record (`store_id NOT NULL`), and one payment. Physical stock (including required store-supplied service materials per `P5-DEC-07`) is reserved atomically in `automotive-product`, and bay+appointment hold is reserved atomically in `store-management`, sharing the same 10-minute `expires_at` (`P5-DEC-08`).
 
 ---
 
@@ -99,11 +99,12 @@ Keep multi-device carts and open cart views informed of cart edits, inventory ch
 1. **Rejected: Eager Persistent Cart Reverse-Indexing** or **Per-Product RabbitMQ Queues/Topics**: Maintaining persistent cart-to-product indexes or creating a RabbitMQ queue per product/store/user causes unbounded broker/storage overhead.
 2. **Rejected: Single Competing-Consumer Queue for SSE**: In a multi-replica Kubernetes deployment, a competing-consumer queue delivers an event to only *one* `automotive-operations` pod, missing active SSE connections on other pods.
 3. **SELECTED (`P4-DEC-07`)**: **One Authenticated SSE Stream + Per-Pod In-Memory Active-Subscription Inverted Indexes + Shared Fan-Out**:
-   - Each `automotive-operations` pod maintains in-memory inverted indexes **strictly for currently open authenticated SSE connections** on that pod:
+   - Each `automotive-operations` pod maintains in-memory inverted indexes **strictly for currently open authenticated SSE connections** on that pod, scoped to the customer's selected `store_id`:
      - `user_id -> active connections` (`CART_UPDATED`)
      - `(store_id, physical_product_id) -> active connections` (`INVENTORY_AVAILABILITY_CHANGED`)
      - `physical_product_id -> active connections` (`PHYSICAL_PRODUCT_PRICE_CHANGED`)
      - `(store_id, service_id) -> active connections` (`STORE_SERVICE_PRICE_CHANGED`)
+     - `(store_id, date_window, duration_minutes) -> active connections` (`SERVICE_SLOT_AVAILABILITY_CHANGED`, `P5-DEC-09`)
    - **Multi-Replica Fan-Out & Index Consistency**: `automotive-product` publishes domain events to `tirestore.events` (Part 1 Outbox); each `automotive-operations` pod binds an **ephemeral exclusive auto-delete RabbitMQ queue** to `tirestore.events` (for product/inventory/price signals) and subscribes to a lightweight **Redis Pub/Sub channel** (`sse:cart:user-updates`) for `CART_UPDATED` signals. When `CART_UPDATED {user_id, version}` arrives on another pod with locally connected emitters for `user_id` and `version > applied_cart_version[user_id]`, that pod reads `cart:account:{user_id}` from Redis, refreshes its local inverted indexes (`O(items)`), and emits `CART_UPDATED` (ignoring out-of-order versions; pods with 0 local connections for `user_id` ignore the signal). Missed Pub/Sub messages are recovered on SSE reconnect (`Last-Event-ID`) and client focus (`GET /cart` + `POST /cart/validate`), and disconnect/expiry removes all emitter entries.
    - **Reconnect & Authority (`P4-DEC-08`)**: SSE is informational only (never an inventory correctness guarantee). Reconnect, page focus, and Proceed to Checkout perform authoritative REST recovery (`GET /cart`, `POST /catalog/prices:batch`, and atomic multi-store `POST /inventory/reservations`).
 
@@ -147,20 +148,20 @@ Prevent physical double-booking of service bays and technicians across operating
    *Trade-off*: Simple to query, but ignores physical bay equipment constraints (e.g., 3 standard bays and 1 alignment rack) and variable procedure durations (e.g., 90-minute brake jobs vs 30-minute tire rotations), leading to shop floor gridlock.
 2. **Alternative B: Late Physical Bay Assignment**: Customers book a floating appointment slot; store managers manually assign vehicles to bays when they arrive on site.
    *Trade-off*: Flexible for shop managers, but risks severe overbooking if 5 customers requiring alignment racks arrive simultaneously.
-3. **Alternative C (SELECTED PROPOSAL): System-Selected Exact-Bay Reservation with PostgreSQL GiST Range Exclusion**:
-   - The customer selects a time slot and service; the system **automatically selects a compatible physical bay** behind the scenes.
-   - The bay reservation is protected by a PostgreSQL GiST Range Exclusion constraint (`EXCLUDE USING GIST (bay_id WITH =, booked_period WITH &&)`):
+3. **Alternative C (FINALIZED V1 DESIGN — `P5-DEC-05`, `P5-DEC-06`, `P5-DEC-08`, `APT-14`)**: **System-Selected Exact-Bay Reservation with `TSTZRANGE` GiST Exclusion (No `NOW()` in Index)**:
+   - Every active bay at a store can perform every offered service in V1 (`P5-DEC-05`). Customer selects a time slot; `store-management` automatically selects an active bay using a deterministic minimal-fragmentation best-fit heuristic (`bay_number ASC, bay_id ASC` tie-breaker), never exposing bay numbers to customers.
+   - Conflicting expired `HELD` rows are locked and transitioned to `EXPIRED` inside the reservation transaction before inserting; static partial GiST exclusion prevents overlapping `HELD`/`CONFIRMED` occupancy:
      ```sql
-     CREATE TABLE bay_schedule_entry (
+     CREATE TABLE store_management.bay_schedule_entries (
          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-         bay_id UUID NOT NULL REFERENCES service_bay(id),
-         booked_period TSRANGE NOT NULL,
-         status VARCHAR(30) NOT NULL,
+         bay_id UUID NOT NULL REFERENCES store_management.service_bays(id) ON DELETE RESTRICT,
+         booked_period TSTZRANGE NOT NULL,
+         status VARCHAR(32) NOT NULL DEFAULT 'HELD',
          EXCLUDE USING GIST (bay_id WITH =, booked_period WITH &&)
-         WHERE (status NOT IN ('CANCELLED', 'RELEASED'))
+         WHERE (status IN ('HELD', 'CONFIRMED'))
      );
      ```
-   - **Correctness Guarantee**: The database engine physically rejects any overlapping booking on the same bay with SQL state `23P01`. Customers do not need to choose bay numbers; the algorithm assigns the first compatible, available bay automatically.
+   - **Correctness Guarantee**: PostgreSQL physically rejects concurrent overlapping bookings with SQLSTATE `23P01`, while local ACID inside merged `store-management` creates both the bay hold and `service_appointments` row atomically.
 
 ---
 

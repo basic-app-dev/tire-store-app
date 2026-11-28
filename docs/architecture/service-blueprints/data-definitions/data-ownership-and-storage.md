@@ -20,20 +20,20 @@ Every piece of mutable business state has exactly one authoritative owning servi
 | **Stock Reservation (Hold)** | `automotive-product` | Branch Inventory | PostgreSQL | UUID (`stock_reservation_group.id`, `stock_reservation_line.id`) | Operations (Checkout Entry) | Local ACID | 10m TTL (`P3-DEC-07`) / Janitor Purge |
 | **Confirmed Allocation** | `automotive-product` | Branch Inventory | PostgreSQL | `(store_id, physical_product_id)` counter + line | Operations, Fulfillment | Local ACID | Until Partial/Full Handover |
 | **Inventory Operation Audit** | `automotive-product` | Branch Inventory | PostgreSQL (Unpartitioned) | UUID (`inventory_operation.operation_id`) | Staff, Audit | Immutable Exactly-Once | Operational Audit (`stock_movements` / transfers / quarantine `DEFERRED_BY_OWNER_V1`) |
-| **Active Shopping Cart** | `automotive-operations`| Cart & Checkout | Redis String JSON | `cart:account:{user_id}` (`cart_id`, `version`, `(store_id, item_type, item_id)`) | Web, Mobile, Operations | In-Memory / Lua Atomic | 7-day TTL (`P4-DEC-01`; no guest carts in V1) |
-| **Commercial Order** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_id`, parent across stores) | Customer, Staff, Accounting | Local ACID | 7 Years (Permanent) |
-| **Order Fulfillment Group** | `automotive-operations`| Order & Fulfillment | PostgreSQL | `(order_id, store_id)` (`order_fulfillment_groups`) | Customer, Store Staff, Workshop | Local ACID | 7 Years (Permanent) |
+| **Active Shopping Cart** | `automotive-operations`| Cart & Checkout | Redis String JSON | `cart:account:{user_id}` (`cart_id`, `store_id`, `version`, `selected_vehicle`) | Web, Mobile, Operations | In-Memory / Lua Atomic | 7-day TTL (`P4-DEC-01`, `P5-DEC-02`) |
+| **Commercial Order** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_id`, single `store_id` per `P5-DEC-02`) | Customer, Staff, Accounting | Local ACID | 7 Years (Permanent) |
+| **Order Fulfillment Group** | *(Retired in V1 — `P5-DEC-04`)* | — | — | Single-store `orders` restored; physical vs service fulfillment separate internally | — | — | — |
 | **Order Line Snapshot** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`order_line_id`) | Customer, Workshop, Invoicing| Immutable Snapshot | 7 Years |
 | **Checkout Saga State** | `automotive-operations`| Cart & Checkout | PostgreSQL | UUID (`saga_id`) | Recovery Daemon, Operations | Local ACID | 90 Days post-completion |
 | **Work Order Ticket** | `automotive-operations`| Work Order Execution| PostgreSQL | UUID (`work_order_id`) | Technicians, Store Staff | Local ACID / Pessimistic | 7 Years (Permanent) |
 | **Work Order Task Checklist** | `automotive-operations`| Work Order Execution| PostgreSQL | UUID (`task_id`) | Technicians, Shop Workers | Local ACID | 7 Years |
 | **Supplemental Repair Quote** | `automotive-operations`| Work Order Execution| PostgreSQL | UUID (`quote_id`, `revision`) | Customer, Service Advisor | Local ACID / Cryptographic | 7 Years |
-| **Service Entitlement** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`entitlement_token`) | Appointment, Customer | Local ACID | 365 Days (Configurable) |
-| **Physical Store Branch** | `store-management` | Store Facilities | PostgreSQL + PostGIS| UUID (`store_id`) | All Services, APISIX | Strong Authoritative | Permanent Active |
-| **Store Operating Hours** | `store-management` | Store Facilities | PostgreSQL | `(store_id, day_of_week)` | Appointment, Operations, Web | Strong Authoritative | Permanent Active |
-| **Service Bay Facility** | `store-management` | Bay Scheduling | PostgreSQL | UUID (`bay_id`) | Operations, Appointment | Strong Authoritative | Permanent Active |
-| **Bay Schedule Entry** | `store-management` | Bay Scheduling | PostgreSQL (GiST) | UUID (`schedule_entry_id`) | Operations, Appointment | GiST Range Exclusion | Active Schedule + 90d Audit |
-| **Customer Appointment** | `appointment` | Appointment Mgt | PostgreSQL | UUID (`appointment_id`) | Customer, Store Staff | Local ACID | 3 Years |
+| **Service Entitlement** | `automotive-operations`| Order & Fulfillment | PostgreSQL | UUID (`entitlement_token`) | Store Mgt (Appt), Customer | Local ACID | 365 Days (Configurable) |
+| **Physical Store Branch** | `store-management` | Store Administration | PostgreSQL + PostGIS| UUID (`store_id`) | All Services, APISIX | Strong Authoritative | Permanent Active |
+| **Store Operating Hours & Closures** | `store-management` | Store Administration | PostgreSQL | `(store_id, day_of_week, interval_seq)` + `store_calendar_exceptions` | Operations, Web | Strong Authoritative | Permanent Active |
+| **Service Bay Facility** | `store-management` | Bay Scheduling | PostgreSQL | UUID (`bay_id`) | Operations, Staff | Strong Authoritative | Permanent Active |
+| **Bay Schedule Entry** | `store-management` | Bay Scheduling | PostgreSQL (GiST) | UUID (`schedule_entry_id`) | Operations | GiST Range Exclusion | Active + Non-Destructive History |
+| **Customer Appointment** | `store-management` *(merged from `appointment`)* | Appointment Management | PostgreSQL | UUID (`appointment_id`) | Customer, Store Staff | Local ACID | 3 Years |
 | **VIN Physical Vehicle** | `vehicle-product` | Vehicle Inventory | PostgreSQL | 17-char `vin` | Sales, Public Listings | Strong Authoritative | Permanent Vehicle Record |
 | **150-Point Inspection** | `vehicle-product` | Vehicle Condition | PostgreSQL (JSONB) | UUID (`inspection_id`) | Sales, Customer, Workshop | Immutable Snapshot | Permanent |
 | **Exclusive VIN Sales Hold**| `vehicle-product` | Vehicle Inventory | PostgreSQL | 17-char `vin` | Sales Saga | Local ACID | 72h TTL / Janitor Purge |

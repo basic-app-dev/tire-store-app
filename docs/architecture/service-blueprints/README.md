@@ -2,8 +2,8 @@
 
 > **Status**: CANONICAL CONSOLIDATED BLUEPRINT SUITE (Phase 2F-B-R Master Index)
 > **Git Baseline**: `d6fa083cc00122b5ce32db9d16507fa54f09bca4` (Branch: `main`)
-> **Scope**: Exactly 8 Standalone Spring Boot 4.2.x Microservices, Next.js 14+ Web Portal, Expo Mobile App, Apache APISIX Gateway
-> **Consolidated Architecture**: **18 Substantive Domain Modules** across **14 Canonical Specifications**
+> **Scope**: 7 Target Standalone Spring Boot 4.2.x Microservices (`appointment` merged into `store-management` per `P5-DEC-01`, port 8097 retired), Next.js 14+ Web Portal, Expo Mobile App, Apache APISIX Gateway
+> **Consolidated Architecture**: **17 Substantive Domain Modules** across **13 Active Canonical Specifications** (retired `appointment.md` archived to [`archive/appointment-service-legacy.md`](./archive/appointment-service-legacy.md))
 > **Total Cataloged Operations**: **109 Business Activities** | **92 Unique API Endpoint Contracts**
 
 ---
@@ -37,9 +37,10 @@ Each standalone microservice is fully specified in its single canonical referenc
 | **[`services/vehicle-product.md`](./services/vehicle-product.md)**             | 8094 | VIN-Specific Inventory, 150-Pt Inspections, Listings      |    2    |     10     |       8       |
 | **[`services/notification.md`](./services/notification.md)**                   | 8095 | Multi-Channel Delivery (SMS, Email, Push) & Templates     |    2    |     9      |       6       |
 | **[`services/identity-access.md`](./services/identity-access.md)**             | 8096 | User Profiles, Keycloak Sync, Store RBAC & Garage         |    2    |     7      |       6       |
-| **[`services/appointment.md`](./services/appointment.md)**                     | 8097 | Service Appointments, Rescheduling & Entitlements         |    2    |     10     |       8       |
-| **[`services/store-management.md`](./services/store-management.md)**           | 8098 | Stores, Facilities, Hours, Capabilities & GiST Bay Holds  |    2    |     13     |      10       |
-| **TOTAL**                                                                      |  —   | **8 Standalone Microservices**                            | **18**  |  **109**   |    **92**     |
+| **[`services/store-management.md`](./services/store-management.md)**           | 8098 | Stores, Hours, Closures, Bay Scheduling & Appointments  |    3    |     23     |      18       |
+| **TOTAL**                                                                      |  —   | **7 Target Standalone Microservices**                     | **17**  |  **109**   |    **92**     |
+
+> *Historical Archive*: Legacy standalone `appointment` (:8097) docs are archived at [`archive/appointment-service-legacy.md`](./archive/appointment-service-legacy.md) and [`archive/appointment-data-legacy.md`](./archive/appointment-data-legacy.md).
 
 ---
 
@@ -51,7 +52,7 @@ Phase 2F-C provides the complete physical database models, PostgreSQL DDL schema
 - **[`data-definitions/data-ownership-and-storage.md`](./data-definitions/data-ownership-and-storage.md)**: Global authoritative entity matrix and SQL vs NoSQL technology evaluation.
 - **[`data-definitions/events-and-projections.md`](./data-definitions/events-and-projections.md)**: RabbitMQ event contracts, transactional outbox design, and read projections.
 - **[`data-definitions/data-lifecycle-and-capacity.md`](./data-definitions/data-lifecycle-and-capacity.md)**: Data retention, TTLs, sizing growth (15–50 stores), and disaster recovery targets.
-- **[`data-definitions/services/`](./data-definitions/services/)**: Dedicated PostgreSQL DDL schemas, constraints, and indexes for all 8 microservices.
+- **[`data-definitions/services/`](./data-definitions/services/)**: Dedicated PostgreSQL DDL schemas, constraints, and indexes for all 7 target microservices (`appointment.md` merged into `store-management.md`).
 
 ---
 

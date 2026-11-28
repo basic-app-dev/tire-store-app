@@ -1,6 +1,6 @@
 # Approved Microservice Boundaries
 
-There are **exactly eight approved business microservices**, all independent Spring Boot applications. The API gateway and frontend servers are **infrastructure/application edges**, not additional business services. Keep these boundaries unless the owner explicitly changes them.
+There are **exactly seven approved business microservices** in the target architecture (consolidated from eight on 2026-11-27 by merging `appointment` into `store-management` per `P5-DEC-01`), all independent Spring Boot applications. The API gateway and frontend servers are **infrastructure/application edges**, not additional business services. Keep these boundaries unless the owner explicitly changes them.
 
 ## Domain A — Automotive Services
 1. **Automotive Operations & Billing** (`automotive-operations`): Payment Module, Work Order Module, Order Module, Billing Module. Owns automotive orders, service jobs, invoicing and automotive payment coordination. Does not mutate product inventory tables.
@@ -13,8 +13,7 @@ There are **exactly eight approved business microservices**, all independent Spr
 ## Domain C — Shared Platform
 5. **Notification** (`notification`): Received Notification Module, Delivery Template Module. Owns notification records/templates, delivery dispatch, preferences, status and retries.
 6. **Identity & Access** (`identity-access`): Authentication Integration Module, User Profile Module, Access Control Module. Owns application users, store-scoped assignments and policies; integrates with Keycloak, which issues identity tokens.
-7. **Appointment** (`appointment`): Appointment Management Module. Owns appointment lifecycle, cancellations/rescheduling and coordination with store resource reservations.
-8. **Store Management** (`store-management`): Resource Reservation Module, Store Information Module. Owns branches, operating hours, service capabilities, bays/equipment/resource capacities, and exclusive resource holds.
+7. **Store Management** (`store-management`): Store Administration Module, Bay Scheduling Module, and Appointment Management Module (merged from retired standalone `appointment` per `P5-DEC-01`). Owns branches, operating hours, time zones, holidays/closures, store service offerings, active bays, exclusive bay holds, and customer vehicle appointments/rescheduling/cancellations in one PostgreSQL database.
 
 ## Ownership and interaction invariants
 - Every service independently builds, deploys, stores data, evolves migrations and exposes documented interfaces.

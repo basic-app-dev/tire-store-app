@@ -13,8 +13,7 @@
 
 ```mermaid
 erDiagram
-    ORDER_RECORD ||--|{ ORDER_FULFILLMENT_GROUP : partitions
-    ORDER_FULFILLMENT_GROUP ||--|{ ORDER_LINE_ITEM : contains
+    ORDER_RECORD ||--|{ ORDER_LINE_ITEM : contains
     ORDER_RECORD ||--o| CHECKOUT_SAGA_INSTANCE : orchestrates
     ORDER_RECORD ||--o{ WORK_ORDER : initiates
     WORK_ORDER ||--|{ WORK_ORDER_TASK : includes
@@ -26,24 +25,17 @@ erDiagram
         uuid id PK
         varchar order_number UK
         uuid customer_id
+        uuid store_id
+        jsonb selected_vehicle_snapshot
         varchar status
         integer total_amount_cents
         char currency
         timestamptz created_at
     }
 
-    ORDER_FULFILLMENT_GROUP {
-        uuid id PK
-        uuid order_id FK
-        uuid store_id
-        varchar fulfillment_mode
-        varchar status
-    }
-
     ORDER_LINE_ITEM {
         uuid id PK
         uuid order_id FK
-        uuid fulfillment_group_id FK
         uuid store_id
         varchar item_type
         uuid physical_product_id
@@ -85,14 +77,18 @@ CREATE TABLE automotive_operations.orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_number VARCHAR(32) NOT NULL UNIQUE,
     customer_id UUID NOT NULL,
+    store_id UUID NOT NULL, -- Single selected store per order (P5-DEC-02 supersedes multi-store orders)
     cart_id UUID NOT NULL,
     cart_version INTEGER NOT NULL,
+    customer_garage_vehicle_id UUID NULL, -- Optional convenience ref; never relied on for historical data
+    selected_vehicle_snapshot JSONB NULL CHECK (selected_vehicle_snapshot IS NULL OR jsonb_typeof(selected_vehicle_snapshot) = 'object'), -- Required when order has >=1 SERVICE line (P5-DEC-03)
     status VARCHAR(32) NOT NULL,
     subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
     tax_cents INTEGER NOT NULL CHECK (tax_cents >= 0),
     total_amount_cents INTEGER NOT NULL CHECK (total_amount_cents >= 0),
     currency CHAR(3) NOT NULL DEFAULT 'USD',
     customer_email VARCHAR(255) NOT NULL,
+    pickup_pin_hash VARCHAR(64) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     version INTEGER NOT NULL DEFAULT 1,
@@ -103,23 +99,7 @@ CREATE TABLE automotive_operations.orders (
 );
 
 CREATE INDEX idx_orders_customer ON automotive_operations.orders (customer_id, created_at DESC);
-
-CREATE TABLE automotive_operations.order_fulfillment_groups (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
-    store_id UUID NOT NULL, -- Opaque reference to store-management store ID (NO cross-DB FK)
-    fulfillment_mode VARCHAR(24) NOT NULL DEFAULT 'MIXED'
-        CHECK (fulfillment_mode IN ('PICKUP', 'INSTALLATION', 'SHIPPING', 'MIXED')),
-    status VARCHAR(32) NOT NULL DEFAULT 'PENDING'
-        CHECK (status IN ('PENDING', 'READY_FOR_PICKUP', 'SCHEDULED', 'PARTIALLY_FULFILLED', 'FULFILLED', 'CANCELLED')),
-    pickup_pin_hash VARCHAR(64) NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_order_fulfillment_store UNIQUE (order_id, store_id),
-    CONSTRAINT uq_fulfillment_group_id_order_store UNIQUE (id, order_id, store_id)
-);
-
-CREATE INDEX idx_fulfillment_groups_store_status ON automotive_operations.order_fulfillment_groups (store_id, status, created_at DESC);
+CREATE INDEX idx_orders_store_status ON automotive_operations.orders (store_id, status, created_at DESC);
 ```
 
 ### 2.2 Table: `order_items`
@@ -147,9 +127,8 @@ CREATE INDEX idx_entitlement_customer ON automotive_operations.service_entitleme
 
 CREATE TABLE automotive_operations.order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id UUID NOT NULL,
-    fulfillment_group_id UUID NOT NULL,
-    store_id UUID NOT NULL,
+    order_id UUID NOT NULL REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
+    store_id UUID NOT NULL, -- Matches orders.store_id (single-store order per P5-DEC-02)
     item_type VARCHAR(24) NOT NULL CHECK (item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')),
     physical_product_id UUID NULL, -- Opaque reference to automotive_product.physical_product(id); NO cross-DB FK
     service_id UUID NULL,          -- Opaque reference to automotive_product.service(id); NO cross-DB FK
@@ -174,19 +153,13 @@ CREATE TABLE automotive_operations.order_items (
     ),
     CONSTRAINT chk_item_booking_status CHECK (booking_status IN (
         'NOT_APPLICABLE', 'ENTITLED_UNSCHEDULED', 'SCHEDULED', 'COMPLETED'
-    )),
-    CONSTRAINT fk_order_items_order FOREIGN KEY (order_id)
-        REFERENCES automotive_operations.orders(id) ON DELETE CASCADE,
-    CONSTRAINT fk_order_items_fulfillment_group FOREIGN KEY (fulfillment_group_id, order_id, store_id)
-        REFERENCES automotive_operations.order_fulfillment_groups(id, order_id, store_id) ON DELETE RESTRICT
+    ))
 );
 
 CREATE INDEX idx_order_items_order ON automotive_operations.order_items (order_id);
 ```
 
-- **Rejected Mismatch Example (`fk_order_items_fulfillment_group`)**: Suppose `order_fulfillment_groups` has row `fg-store-A` with `(id = fg-store-A, order_id = ord-1, store_id = Store A)`. Attempting `INSERT INTO automotive_operations.order_items (order_id, fulfillment_group_id, store_id, ...)` with `(ord-1, fg-store-A, Store B)` (or `(ord-2, fg-store-A, Store A)`) is rejected by PostgreSQL with SQLSTATE `23503` (`foreign_key_violation` on `fk_order_items_fulfillment_group`).
-
-### 2.2B Table: `checkout_attempt` (`P4-DEC-03`, `P4-DEC-05`, `P4-DEC-09`)
+### 2.2B Table: `checkout_attempt` (`P5-DEC-02`, `P5-DEC-03`, `P5-DEC-08`, `P4-DEC-09`)
 
 ```sql
 CREATE TABLE automotive_operations.checkout_attempt (
@@ -194,13 +167,16 @@ CREATE TABLE automotive_operations.checkout_attempt (
     cart_id UUID NOT NULL,
     cart_version INTEGER NOT NULL,
     customer_id UUID NOT NULL, -- Derived strictly from verified JWT sub
+    store_id UUID NOT NULL,    -- Single selected store per checkout (P5-DEC-02)
+    selected_vehicle_snapshot JSONB NULL, -- Single vehicle for all service lines (P5-DEC-03)
     idempotency_key UUID NOT NULL,
     checkout_fencing_token UUID NOT NULL DEFAULT gen_random_uuid(),
     locked_keys JSONB NOT NULL DEFAULT '[]'::jsonb, -- Canonical snapshot keys protected until COMPLETED/FAILED/CANCELLED/EXPIRED_UNAUTHORIZED
     reservation_group_id UUID NULL, -- Opaque reference to automotive_product.stock_reservation_group(id)
+    bay_reservation_id UUID NULL,   -- Opaque reference to store_management.bay_schedule_entries(id)
     payment_intent_id VARCHAR(128) NULL,
     status VARCHAR(32) NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL, -- Authoritative 10-minute stock-hold deadline (clock_timestamp() + INTERVAL '10 minutes')
+    expires_at TIMESTAMPTZ NOT NULL, -- Authoritative 10-minute deadline shared across stock & bay holds (P5-DEC-08)
     cart_cleaned_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -313,24 +289,31 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
 
 ## 3. Redis Cart & Mutation Deduplication Modeling (`P4-DEC-01`, `P4-DEC-02`, `P4-DEC-06`, `P4-DEC-09`)
 
-### 3.1 Key Schema: Authenticated Account Cart Document
+### 3.1 Key Schema: Authenticated Single-Store Account Cart Document (`P5-DEC-02`, `P5-DEC-03`)
 
-- **Key Pattern**: `cart:account:{user_id}` (one logical cart per authenticated Keycloak `sub` UUID; zero guest carts or `user-cart` secondary pointer drift in V1).
+- **Key Pattern**: `cart:account:{user_id}` (one logical cart per authenticated Keycloak `sub` UUID; zero guest carts in V1).
 - **Redis Type**: String (Serialized JSON), initialized atomically via Lua `SET NX` on first authenticated mutation.
 - **TTL**: `604,800` seconds (7 days), refreshed on every successful mutation.
-- **Canonical Line Identity**: `(store_id, item_type, item_id)` where `item_type IN ('PHYSICAL_PRODUCT', 'SERVICE')`. Identical composite keys merge quantities; services are independently purchasable without `linked_product_line_id` or `selected_vehicle`.
+- **Mandatory Single-Store & Single-Vehicle Rules**: Top-level `store_id` is authoritative; every cart is limited to **one store**. Within `store_id`, canonical line identity is `(item_type, item_id)` (`(store_id, item_type, item_id)` in backend product/inventory calls). Physical-only carts require no `selected_vehicle`; adding the first `SERVICE` line requires setting one `selected_vehicle` shared by all service lines in the cart.
 - **Value JSON Structure**:
   ```json
   {
     "cart_id": "7b8c9d0e-1f2a-3b4c-5d6e-7f8a9b0c1d2e",
     "user_id": "u9z8y7x6-5w4v-3u2t-1s0r-q9p8o7n6m5l4",
+    "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+    "selected_vehicle": {
+      "customer_garage_vehicle_id": "g1a2b3c4-1111-4000-8000-000000000001",
+      "year": 2022,
+      "make": "Toyota",
+      "model": "RAV4",
+      "trim": "XLE"
+    },
     "version": 4,
     "currency": "USD",
     "created_at": 1732400000,
     "updated_at": 1732400500,
     "items": [
       {
-        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
         "item_type": "PHYSICAL_PRODUCT",
         "item_id": "8a3e7b1a-4d2c-4b5a-9f8e-1b2c3d4e5f6a",
         "sku_code": "MIC-DEF2-2256517",
@@ -339,22 +322,12 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
         "advisory_unit_price_cents": 14999
       },
       {
-        "store_id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
         "item_type": "SERVICE",
         "item_id": "a1b2c3d4-0004-4000-8000-000000000004",
         "service_code": "INSTALL_4_WHEELS",
         "title": "Tire Mounting & Balancing (4-Wheel Package)",
         "quantity": 1,
         "advisory_unit_price_cents": 8000
-      },
-      {
-        "store_id": "2b3c4d5e-6f7a-8b9c-0d1e-2f3a4b5c6d7e",
-        "item_type": "PHYSICAL_PRODUCT",
-        "item_id": "d5e6f7a8-9b0c-4d1e-8f2a-3b4c5d6e7f8a",
-        "sku_code": "BOSCH-ICON-18",
-        "title": "Bosch ICON 18-Inch Wiper Blade",
-        "quantity": 2,
-        "advisory_unit_price_cents": 2499
       }
     ]
   }
@@ -379,8 +352,8 @@ CREATE UNIQUE INDEX idx_work_order_quote_rev ON automotive_operations.supplement
 
 ## 4. Local ACID Transaction Boundaries
 
-1. **Unified Multi-Store Checkout Initiation (`ACT-OPS-002`, `P4-DEC-03`, `P4-DEC-05`, `P4-DEC-08`)**:
-   `BEGIN` → Insert `checkout_attempt` (`expires_at = clock_timestamp() + INTERVAL '10 minutes'`, `checkout_fencing_token`) → Insert `orders` (`PENDING_PAYMENT`) → Insert `order_fulfillment_groups` (1 per `store_id`) → Insert `order_items` (bound to `fulfillment_group_id` + `store_id`) → Insert `checkout_saga_instance` → `COMMIT`. Authoritative price revalidation (`POST /catalog/prices:batch`) and atomic multi-store stock hold (`POST /inventory/reservations` passing `expires_at`) occur over HTTP **outside** this SQL transaction; any failure transitions `checkout_attempt` to `FAILED`.
+1. **Single-Store Unified Checkout Initiation (`ACT-OPS-002`, `P5-DEC-02`, `P5-DEC-03`, `P5-DEC-08`)**:
+   `BEGIN` → Insert `checkout_attempt` (`store_id`, `selected_vehicle_snapshot`, `expires_at = clock_timestamp() + INTERVAL '10 minutes'`, `locked_keys`, `checkout_fencing_token`) → Insert `orders` (`store_id`, `PENDING_PAYMENT`) → Insert `order_items` (`store_id`) → Insert `checkout_saga_instance` → `COMMIT`. Authoritative price/material/fitment validation (`automotive-product`), single-store stock hold (`POST /inventory/reservations`), and atomic bay+appointment hold (`store-management` `POST /bays/reservations` passing the same `expires_at`) occur over HTTP **outside** this SQL transaction; any failure compensates acquired holds and transitions `checkout_attempt` to `FAILED`.
 2. **Supplemental Quote Approval (`ACT-OPS-022`)**:
    `BEGIN` → `SELECT * FROM supplemental_quotes WHERE id = :id FOR UPDATE` → Update quote status to `APPROVED` → Insert new `work_order_tasks` for authorized labor/parts → Insert `outbox_event` → `COMMIT`.
 

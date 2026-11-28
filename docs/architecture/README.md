@@ -5,7 +5,7 @@ This directory contains stable, reusable project decisions. **Task instructions 
 Read in this order:
 
 1. [01-product-scope.md](01-product-scope.md) — purpose, roles, workflows, multi-store model.
-2. [02-service-architecture.md](02-service-architecture.md) — the eight approved service boundaries and ownership rules.
+2. [02-service-architecture.md](02-service-architecture.md) — the seven approved target service boundaries and ownership rules (`P5-DEC-01`).
 3. [03-technology-stack.md](03-technology-stack.md) — approved frameworks, tools, and exclusions.
 4. [04-engineering-standards.md](04-engineering-standards.md) — repository architecture, communication, security, data, testing.
 5. [05-infrastructure-deployment.md](05-infrastructure-deployment.md) — Kubernetes and operations.

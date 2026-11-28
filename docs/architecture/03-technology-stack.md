@@ -2,7 +2,7 @@
 
 ## Backend
 - Java **25 LTS** application code, **Spring Boot 4.2.x**; Spring Cloud **2026.0.x** components only where needed. Verify specific dependency compatibility before initialization/upgrades.
-- **Gradle Kotlin DSL** (`settings.gradle.kts`, `build.gradle.kts`) for eight standalone Gradle projects, each with its own dedicated Gradle Wrapper. **Do not write Kotlin business code merely because the build DSL is Kotlin.**
+- **Gradle Kotlin DSL** (`settings.gradle.kts`, `build.gradle.kts`) for seven target standalone Gradle projects (`P5-DEC-01`), each with its own dedicated Gradle Wrapper. **Do not write Kotlin business code merely because the build DSL is Kotlin.**
 - **Spring Web MVC** for backend REST controllers (`@RestController`), not server-rendered business pages.
 - **Spring Security** OAuth2/OIDC resource-server capabilities, Jakarta Validation, Spring transactions; **Spring AOP** selectively for cross-cutting infrastructure, never hidden core workflows.
 - **Spring Data JPA/Hibernate** for suitable transactional persistence; **JdbcClient/JDBC** for SQL needing explicit control. **Flyway** migrations. Spring Cache / Spring Data Redis only when warranted.
@@ -16,7 +16,7 @@
 - **pnpm workspaces** for TypeScript packages (generated OpenAPI clients, stable shared types/design tokens); Turborepo optional, not mandatory.
 
 ## Data and communication
-- **PostgreSQL**, logically separate database and credentials per each of eight services; one cluster initially is acceptable.
+- **PostgreSQL**, logically separate database and credentials per each of seven target services (`P5-DEC-01`); one cluster initially is acceptable.
 - **RabbitMQ + Spring AMQP**, versioned domain-event contracts, transactional outbox, idempotent consumers, dead-letter queues and observability.
 - **REST/JSON + OpenAPI** default; gRPC only after measured needs; no GraphQL or Kafka initially.
 - **Redis** only for targeted caching/ephemeral concerns, never the authoritative inventory/payment/order record.

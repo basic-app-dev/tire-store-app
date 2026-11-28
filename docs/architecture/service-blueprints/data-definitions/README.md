@@ -1,9 +1,9 @@
 # Tire-Store-App Data Architecture & Database Engineering Specifications
 
 > **Status**: AUTHORITATIVE DATA ARCHITECTURE SPECIFICATION (Phase 2F-C + Part 1 Foundations)
-> **Scope**: 8 Microservices, Dedicated Logical PostgreSQL Databases & Matching Schemas, Redis Cart/Cache Data Models, RabbitMQ Contracts (`tirestore.events`) & Outbox/Inbox Architecture
+> **Scope**: 7 Target Microservices (`appointment` merged into `store-management` per `P5-DEC-01`), Dedicated Logical PostgreSQL Databases & Matching Schemas, Redis Cart/Cache Data Models, RabbitMQ Contracts (`tirestore.events`) & Outbox/Inbox Architecture
 > **Key Architectural Mandates**:
-> - Strictly 8 standalone microservice databases, each with **one logical PostgreSQL database and one matching named schema** (e.g., `automotive_operations`); zero shared tables or cross-database joins.
+> - Strictly 7 target standalone microservice databases (`appointment` merged into `store-management` per `P5-DEC-01`), each with **one logical PostgreSQL database and one matching named schema** (e.g., `automotive_operations`); zero shared tables or cross-database joins.
 > - Separate Flyway migration role (DDL on own schema only, explicit `schemas`/`defaultSchema`) and least-privilege runtime role (DML only, zero cross-service grants).
 > - Every producing/consuming service owns `<service_schema>.outbox_event` and `<service_schema>.consumer_inbox` inside its own schema.
 > - Database-per-service ownership, not database-per-physical-store.
@@ -32,14 +32,15 @@ Each standalone microservice owns an implementation-ready data specification det
 
 | Service Specification | Port | Primary Storage | Key Tables / Redis Namespaces |
 | :--- | :---: | :--- | :--- |
-| **[`services/automotive-operations.md`](./services/automotive-operations.md)** | 8091 | PostgreSQL + Redis | `orders`, `order_items`, `checkout_saga_instance`, `work_orders`, `work_order_tasks`, `supplemental_quotes`; Redis `cart:{id}` |
-| **[`services/automotive-product.md`](./services/automotive-product.md)** | 8092 | PostgreSQL | `product_category`, `brand`, `physical_product`, `tire_spec`, `wiper_spec`, `wheel_spec`, `brake_spec`, `service`, `store_service_price`, `vehicle_configuration`, fitment evidence, `store_inventory`, `stock_reservation_group`, `stock_reservation_line`, `inventory_operation` |
+| **[`services/automotive-operations.md`](./services/automotive-operations.md)** | 8091 | PostgreSQL + Redis | `orders`, `order_items`, `checkout_attempt`, `checkout_saga_instance`, `work_orders`, `work_order_tasks`, `supplemental_quotes`; Redis `cart:account:{user_id}` |
+| **[`services/automotive-product.md`](./services/automotive-product.md)** | 8092 | PostgreSQL | `product_category`, `brand`, `physical_product`, `tire_spec`, `wiper_spec`, `wheel_spec`, `brake_spec`, `service`, `service_material_requirement`, `store_service_price`, `vehicle_configuration`, fitment evidence, `store_inventory`, `stock_reservation_group`, `stock_reservation_line`, `inventory_operation_batch`, `inventory_operation` |
 | **[`services/vehicle-sales.md`](./services/vehicle-sales.md)** | 8093 | PostgreSQL + S3 | `sales_deals`, `holding_deposits`, `sales_contracts`, `trade_in_appraisals`, `vehicle_sales_sagas` |
 | **[`services/vehicle-product.md`](./services/vehicle-product.md)** | 8094 | PostgreSQL + S3 | `vin_vehicles`, `mechanical_inspections`, `vin_sales_holds`, `vehicle_listings`, `vehicle_photos` |
 | **[`services/notification.md`](./services/notification.md)** | 8095 | PostgreSQL | `notification_templates`, `customer_preferences`, `notification_requests`, `delivery_attempts` |
 | **[`identity-access.md`](./services/identity-access.md)** | 8096 | PostgreSQL | `user_profiles`, `store_role_assignments`, `customer_garage_vehicles` |
-| **[`appointment.md`](./services/appointment.md)** | 8097 | PostgreSQL | `service_appointments`, `appointment_reschedule_logs`, `service_entitlements` |
-| **[`store-management.md`](./services/store-management.md)** | 8098 | PostgreSQL + PostGIS | `store_branches`, `store_operating_hours`, `service_bays`, `bay_schedule_entries` (GiST range) |
+| **[`store-management.md`](./services/store-management.md)** | 8098 | PostgreSQL + PostGIS | `store_branches`, `store_operating_hours`, `store_calendar_exceptions`, `store_service_offerings`, `service_bays`, `bay_unavailability_blocks`, `bay_schedule_entries`, `service_appointments`, `appointment_services`, `appointment_reschedule_logs` |
+
+> *Historical Archive*: Retired `appointment_db` notes are archived at [`../archive/appointment-data-legacy.md`](../archive/appointment-data-legacy.md).
 
 ---
 

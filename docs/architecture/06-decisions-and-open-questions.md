@@ -1,14 +1,14 @@
 # Architecture Decision Register (Root Index)
 
-> **Canonical Decision Authority**: The single master architecture decision register is [`service-blueprints/approved-decisions.md`](./service-blueprints/approved-decisions.md) (retaining `ADR-01`–`ADR-18`, Part 0 governance rules `GOV-01`–`GOV-05`, correction directions `COR-DIR-01`–`COR-DIR-10`, and finalized Part 1–4 decisions `P1-DEC`–`P4-DEC`, including `P3-DEC-07` 10-minute checkout-entry hold and `P4-DEC-01`/`P4-DEC-03`/`P4-DEC-04` authenticated Redis carts and unified multi-store checkout).
+> **Canonical Decision Authority**: The single master architecture decision register is [`service-blueprints/approved-decisions.md`](./service-blueprints/approved-decisions.md) (retaining `ADR-01`–`ADR-18`, Part 0 governance rules `GOV-01`–`GOV-05`, correction directions `COR-DIR-01`–`COR-DIR-10`, and finalized Part 1–5 decisions `P1-DEC`–`P5-DEC`, including `P5-DEC-01` 7-service consolidation merging `appointment` into `store-management`, `P5-DEC-02` mandatory single-store cart, `P5-DEC-03` single-vehicle service carts, and `P5-DEC-08` shared 10-minute checkout-entry hold).
 > **Correction Remediation Tracker**: All 132 Round-2 audit findings across Parts 0–12 are tracked in [`service-blueprints/architecture-correction-register.md`](./service-blueprints/architecture-correction-register.md).
 > This root document preserves original technology/product scope decisions and open verification gates without creating a competing decision authority.
 
 ## Approved and stable (Foundational Stack & Scope)
 - **Scope:** one automotive company with multiple branches; web, Android and iOS; tire sales, repair management, inventory and used-car sales.
-- **Business boundaries:** precisely eight independent microservices in Automotive Services, Used-Car Sales and Shared Platform, as defined in `02-service-architecture.md`.
+- **Business boundaries:** precisely seven target independent microservices (`appointment` merged into `store-management` per `P5-DEC-01`) in Automotive Services, Used-Car Sales and Shared Platform, as defined in `02-service-architecture.md`.
 - **Backend:** Java 25 LTS, Spring Boot 4.2.x, appropriate Spring Cloud 2026.0.x modules, Gradle **Kotlin DSL** (business code still Java), Spring MVC REST.
-- **Build & Runtime Independence:** eight standalone Spring Boot projects inside one Git monorepo, each with its own independent Gradle build, wrapper, and runtime. Centralized multi-project Gradle build is rejected.
+- **Build & Runtime Independence:** seven target standalone Spring Boot projects inside one Git monorepo (`backend/services/appointment/` legacy directory retained intact until Phase 3 per `P5-DEC-01`), each with its own independent Gradle build, wrapper, and runtime. Centralized multi-project Gradle build is rejected.
 - **Gateway:** Apache APISIX OSS on Kubernetes, rather than Spring Cloud Gateway.
 - **Communication:** REST/JSON and RabbitMQ; OpenAPI and versioned events; gRPC/GraphQL/Kafka not baseline.
 - **Persistence:** PostgreSQL ownership per service, Flyway; Redis selectively.

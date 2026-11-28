@@ -7,7 +7,7 @@
 
 ## 1. Master Workflow Catalog Overview
 
-The platform coordinates distributed business capabilities across 8 independently deployed Spring Boot microservices. This document defines the end-to-end sequences, local ACID boundaries, failure recovery paths, and activity mappings for all major business workflows.
+The platform coordinates distributed business capabilities across 7 target independently deployed Spring Boot microservices (`appointment` merged into `store-management` per `P5-DEC-01`). This document defines the end-to-end sequences, local ACID boundaries, failure recovery paths, and activity mappings for all major business workflows.
 
 ```
 Master Business Workflows
@@ -40,35 +40,34 @@ Master Business Workflows
   5. Search engine returns matching tires with MSRP and real-time branch availability.
 - **Activities Involved**: `ACT-PRD-003`, `ACT-PRD-004`, `ACT-PRD-001`, `ACT-IDN-005`.
 
-### WF-02: Authenticated Shopping Cart, Targeted SSE & Multi-Tier Revalidation (`P4-DEC-01`, `P4-DEC-06`, `P4-DEC-07`)
-- **Trigger**: Authenticated customer (Keycloak JWT `sub`) adds/updates items in `cart:account:{user_id}` or opens the cart view across Web/Android/iOS. *(Guest carts and `cart/merge` are retired in V1.)*
-- **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092).
+### WF-02: Authenticated Single-Store Cart, Targeted SSE & Store-Switch Reset (`P4-DEC-01`, `P4-DEC-06`, `P5-DEC-02`, `P5-DEC-09`)
+- **Trigger**: Authenticated customer (Keycloak JWT `sub`) selects a store (`store_id`), adds/updates items in `cart:account:{user_id}`, or opens the cart/slot view across Web/Android/iOS.
+- **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092), `store-management` (:8098).
 - **Sequence**:
-  1. Client calls `POST /api/v1/automotive/operations/cart/items` with `expected_version`, `mutation_id`, and composite key `(store_id, item_type, item_id)` (`PHYSICAL_PRODUCT` or independent `SERVICE`).
-  2. `automotive-operations` executes atomic Redis Lua script (`cart:mut:{user_id}:{mutation_id}` dedupe + `version == expected_version` check) and publishes `CART_UPDATED` via Redis Pub/Sub `sse:cart:user-updates`.
-  3. Active authenticated SSE connections (`GET /events/stream`) receive `CART_UPDATED`, `INVENTORY_AVAILABILITY_CHANGED`, `PHYSICAL_PRODUCT_PRICE_CHANGED`, or `STORE_SERVICE_PRICE_CHANGED` via per-pod in-memory active-subscription inverted indexes (backed by ephemeral per-pod RabbitMQ queues bound to `tirestore.events`).
-  4. On reconnect, page focus, or `POST /cart/validate`, client fetches authoritative Redis cart and `automotive-product` batch prices/balances (`POST /catalog/prices:batch`, `POST /inventory/balances:batch`).
-- **Activities Involved**: `ACT-OPS-017`, `ACT-OPS-019`, `ACT-PRD-006`, `ACT-PRD-023`.
+  1. Customer selects one store (`store_id`). Client calls `POST /api/v1/automotive/operations/cart/items` with `expected_version`, `mutation_id`, `store_id`, `(item_type, item_id)`, and `selected_vehicle` (required on first `SERVICE` line; single vehicle per cart per `P5-DEC-03`).
+  2. Adding an item from a different `store_id` when the cart is populated returns `409 STORE_MISMATCH_CONFIRM_RESET`; switching stores requires explicit confirmation via `POST /cart/switch-store` (honoring active checkout locks).
+  3. Active authenticated SSE connections (`GET /events/stream`) receive `CART_UPDATED`, `INVENTORY_AVAILABILITY_CHANGED`, `PHYSICAL_PRODUCT_PRICE_CHANGED`, `STORE_SERVICE_PRICE_CHANGED`, and `SERVICE_SLOT_AVAILABILITY_CHANGED` (scoped by `(store_id, date_window, duration)`).
+  4. On reconnect, page focus, or `POST /cart/validate`, client fetches authoritative Redis cart, `automotive-product` batch prices/balances, and `store-management` advisory slots.
+- **Activities Involved**: `ACT-OPS-017`, `ACT-OPS-019`, `ACT-PRD-006`, `ACT-PRD-023`, `ACT-APT-001`.
 
-### WF-03: Unified Multi-Store Checkout & Internal Fulfillment Grouping (`P4-DEC-03`, `P4-DEC-04` — Supersedes Single-Store Partitioning)
-- **Trigger**: Authenticated customer selects Proceed to Checkout on a cart containing items from Store A, Store B, etc.
-- **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092).
+### WF-03: Single-Store Unified Checkout & Separate Internal Fulfillment (`P5-DEC-02`, `P5-DEC-04` — Supersedes Multi-Store Checkout)
+- **Trigger**: Authenticated customer selects Proceed to Checkout for their single-store cart (physical-only, service-only, or mixed).
+- **Participating Services**: `automotive-operations` (:8091), `automotive-product` (:8092), `store-management` (:8098).
 - **Sequence**:
-  1. Client calls `POST /api/v1/automotive/operations/checkout/sessions` with `cart_id`, `cart_version`, and `approved_total_cents`. *(Previous `MULTI_STORE_CART_PARTITION_REQUIRED` 422 rejection is superseded.)*
-  2. `automotive-operations` reads `cart:account:{user_id}`, revalidates product/service status and authoritative USD prices (`POST /catalog/prices:batch`), and returns `409 CHECKOUT_VALIDATION_FAILED` if prices/availability changed so the customer can approve the updated total.
-  3. `automotive-operations` creates **one** `checkout_attempt` (`expires_at = +10m`), **one** parent `orders` record, **N** `order_fulfillment_groups` (one per `store_id`), and `order_items`.
-  4. `automotive-operations` calls `automotive-product` (`POST /inventory/reservations`) to atomically reserve all `PHYSICAL_PRODUCT` lines across all stores in one `stock_reservation_group` (`(store_id, physical_product_id)` lock order).
-  5. One customer payment covers the entire parent `orders` record; each store fulfillment group executes pickup, installation, or shipping independently.
-- **Activities Involved**: `ACT-OPS-002`, `ACT-PRD-008`, `ACT-PRD-023`.
+  1. Client calls `POST /api/v1/automotive/operations/checkout/sessions` with `cart_id`, `cart_version`, `store_id`, `approved_total_cents`, and `requested_slot` (required when any service has `requires_store_materials = TRUE`).
+  2. `automotive-operations` freezes the cart snapshot, validates single-store, single-vehicle, store service offerings, material fitment, and authoritative USD prices (`POST /catalog/prices:batch`).
+  3. `automotive-operations` creates **one** `checkout_attempt` (`expires_at = T0 + 10m`) and **one** single-store `orders` record, then reserves physical stock (including required store-supplied materials) in `automotive-product` and bay+appointment in merged `store-management` (:8098) using the **same** 10-minute `expires_at`.
+  4. One customer payment covers the entire order; physical delivery and service work execution proceed as separate internal workflows.
+- **Activities Involved**: `ACT-OPS-002`, `ACT-PRD-008`, `ACT-PRD-023`, `ACT-STR-007`.
 
 ---
 
 ## 3. Distributed Checkout Sagas
 
-### WF-04: Mixed Tire & Service Installation Checkout Saga
-- **Trigger**: Customer submits payment for 4 tires + installation appointment at Store #101.
+### WF-04: Mixed Tire & Service Installation Checkout Saga (`P5-DEC-01`, `P5-DEC-08`)
+- **Trigger**: Customer enters checkout for 4 tires + installation appointment at Store #101.
 - **Saga Orchestrator**: `automotive-operations` (:8091).
-- **Participants**: `automotive-product` (:8092), `store-management` (:8098), `appointment` (:8097), `notification` (:8095), Stripe.
+- **Participants**: `automotive-product` (:8092), `store-management` (:8098, *includes Appointment Management*), `notification` (:8095), Stripe.
 
 ```mermaid
 sequenceDiagram
@@ -77,34 +76,29 @@ sequenceDiagram
     participant Ops as automotive-operations (:8091)
     participant Prod as automotive-product (:8092)
     participant Store as store-management (:8098)
-    participant Appt as appointment (:8097)
     participant Stripe as Stripe API
     participant Notif as notification (:8095)
 
-    Customer->>Ops: POST /checkout/sessions (Enter Unified Multi-Store Checkout)
-    Note over Ops: 1. Persist checkout_attempt (expires_at = +10m)<br/>1 Parent Order + N Fulfillment Groups + Saga
-    Ops->>Prod: POST /inventory/reservations (Multi-store group physical lines, expires_at)
-    Prod-->>Ops: 201 Created (ReservationGroup #G101, TTL: 10m)
-    Note over Ops: Customer clicks Place Order/Pay (Part 5/6 align bay & payment deadline)
-    Ops->>Store: POST /bays/reservations (Store #101, Bay #2, Slot)
-    Store-->>Ops: 201 Created (BayHold #B101, aligned deadline pending Part 5/6)
-    Note over Ops: Persist Saga State (STEP_3_PAYMENT)
-    Ops->>Stripe: Confirm Payment Intent (Idempotency-Key)
+    Customer->>Ops: POST /checkout/sessions (Store #101, Vehicle, Slot)
+    Note over Ops: 1. Persist checkout_attempt (expires_at = T0+10m)<br/>1 Single-Store Order + Saga State
+    Ops->>Prod: POST /inventory/reservations (Store #101 physical + service materials, expires_at)
+    Prod-->>Ops: 201 Created (ReservationGroup #G101, expires_at = T0+10m)
+    Note over Ops: Hold Bay + Appointment Atomically in Merged Store-Management
+    Ops->>Store: POST /bays/reservations (Store #101, Slot, Vehicle, Services, expires_at)
+    Store-->>Ops: 201 Created (BayHold #B101 + Appt #A101 HELD, expires_at = T0+10m)
+    Note over Ops: Customer clicks Place Order / Pay (Part 6 Payment Saga)
+    Ops->>Stripe: Authorize / Capture Payment Intent (Idempotency-Key)
     Stripe-->>Ops: 200 OK (Payment Succeeded)
-    Note over Ops: Persist Saga State (STEP_4_CONFIRM)
-    par Confirm Holds
-        Ops->>Prod: POST /reservations/R101/confirm
+    par Confirm Holds Before Deadline
+        Ops->>Prod: POST /reservations/G101/confirm
         Prod-->>Ops: 200 OK (Stock Allocated)
-    and Confirm Bay
+    and Confirm Bay & Appointment Locally
         Ops->>Store: POST /bays/reservations/B101/confirm
-        Store-->>Ops: 200 OK (Bay Confirmed)
-    and Book Appointment
-        Ops->>Appt: POST /bookings (Order #, Customer, Slot)
-        Appt-->>Ops: 201 Created (Appointment Confirmed)
+        Store-->>Ops: 200 OK (Bay + Appointment CONFIRMED)
     end
-    Note over Ops: Order Status -> PAID<br/>Write Outbox Event (ORDER_PAID)
-    Ops-->>Customer: 200 OK (Order Confirmed)
-    Ops-)Notif: Publish Event: OrderConfirmationRequested
+    Note over Ops: Order Status -> PAID<br/>Fenced Cart Cleanup + Outbox Event (ORDER_CONFIRMED)
+    Ops-->>Customer: 200 OK (Order + Appointment Confirmed)
+    Ops-)Notif: Publish Event: OrderConfirmedEvent
 ```
 
 #### Failure Compensations in WF-04:
@@ -120,18 +114,12 @@ sequenceDiagram
 
 ## 4. Appointment & Workshop Operations
 
-### WF-07: Unscheduled Service Entitlement (SCHEDULE_LATER) Two-Phase Redemption Protocol
-- **Trigger**: Customer purchased service online with `SCHEDULE_LATER` and is now booking an appointment.
-- **Participating Services**: `appointment` (:8097), `automotive-operations` (:8091), `store-management` (:8098), `notification` (:8095).
-- **Coordination Protocol (Durable Two-Phase Handshake - No Cross-Service ACID)**:
-  1. Customer submits `POST /api/v1/appointments/entitlements/redeem` on `appointment` with `redemption_token`, `store_id`, and requested slot.
-  2. `appointment` generates unique `redemption_attempt_id: att-7766-5544`.
-  3. *Phase 1 (Lock Entitlement with Monotonic Generation)*: `appointment` calls `POST /api/v1/automotive/operations/entitlements/{token}/lock-for-redemption` with `attempt_id` and 15m hold lease. `automotive-operations` executes atomic CAS incrementing `fencing_generation = fencing_generation + 1` (`status: ISSUED -> REDEMPTION_PENDING`), returning the generated `fencing_generation`. If already redeemed, refunded, or actively locked, returns HTTP 409 Conflict.
-  4. *Phase 2 (Reserve Bay)*: `appointment` calls `store-management` (`POST /api/v1/stores/bays/reservations`) to acquire bay hold (`HOLD`). If unavailable, `appointment` calls operations to release lock (`POST .../release-redemption-lock`) and returns HTTP 409 Bay Unavailable to customer.
-  5. *Phase 3 (Local Persistence)*: `appointment` inserts `service_appointment` in its PostgreSQL database with `status = CONFIRMED`, `bay_reservation_id`, and `redemption_attempt_id`.
-  6. *Phase 4 (Confirm Bay & Commit Entitlement)*: `appointment` calls `store-management` to confirm bay (`POST .../confirm`), then calls `automotive-operations` (`POST .../commit-redemption`) passing `attempt_id` and `fencing_generation`. Operations verifies fencing generation and transitions `status: REDEMPTION_PENDING -> REDEEMED` binding `redeemed_appointment_id`. Stale attempts with superseded generation numbers are rejected.
-  7. *Recovery & Compensation*: If `appointment` crashes or network times out after Step 3, background daemon `EntitlementLeaseJanitorJob` in operations queries `appointment` status after the 15m lease: if appointment exists, commits entitlement; if absent, restores status to `ISSUED` and releases bay hold.
-  8. *Cancellation / Rescheduling*: Cancelling appointment (`ACT-APT-005`) emits `AppointmentCancelledEvent`; operations consumes event and restores entitlement to `ISSUED` if within legal voucher expiration.
+### WF-07: Unscheduled Service Entitlement (SCHEDULE_LATER) Redemption *(Merged into `store-management` :8098)*
+- **Trigger**: Customer purchased a **material-free** service (`requires_store_materials = FALSE`) online with `SCHEDULE_LATER` and is now booking an appointment. *(Parts-dependent services must be scheduled at checkout per `P5-DEC-07`.)*
+- **Participating Services**: `store-management` (:8098, *Appointment Management + Bay Scheduling*), `automotive-operations` (:8091), `notification` (:8095).
+- **Coordination Protocol (Part 7 Finalization — Local Bay+Appointment TX inside `store-management`, Fenced Entitlement Handshake with `automotive-operations`)**:
+  1. Customer submits `POST /api/v1/appointments/entitlements/redeem` on `store-management` (:8098) with `redemption_token`, `store_id`, and requested slot.
+  2. `store-management` generates unique `redemption_attempt_id: att-7766-5544` and executes the fenced entitlement lock (`automotive-operations`), local ACID bay+appointment hold/confirm (`store-management`), and entitlement commit (`automotive-operations`) per Part 7 (`APT-01`–`APT-12`).
 - **Activities Involved**: `ACT-APT-010`, `ACT-STR-007`, `ACT-STR-008`, `ACT-OPS-004`, `ACT-NOT-003`.
 
 ### WF-08: Workshop Execution, Inspection & Supplemental Quote Approval

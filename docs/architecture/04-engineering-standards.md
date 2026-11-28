@@ -11,7 +11,7 @@ automotive-platform/
 │   │   ├── vehicle-product/           # Standalone Gradle project (settings.gradle.kts, build.gradle.kts, gradlew)
 │   │   ├── notification/              # Standalone Gradle project (settings.gradle.kts, build.gradle.kts, gradlew)
 │   │   ├── identity-access/           # Standalone Gradle project (settings.gradle.kts, build.gradle.kts, gradlew)
-│   │   ├── appointment/               # Standalone Gradle project (settings.gradle.kts, build.gradle.kts, gradlew)
+│   │   ├── appointment/               # Legacy directory (target retired; merged into store-management per P5-DEC-01 — do not delete until Phase 3 migration)
 │   │   └── store-management/          # Standalone Gradle project (settings.gradle.kts, build.gradle.kts, gradlew)
 │   ├── libraries/{security-support,observability-support,api-error-support,test-support}/
 │   └── contracts/{openapi,events}/
@@ -24,7 +24,7 @@ automotive-platform/
 └── pnpm-workspace.yaml
 ```
 
-The gateway may live at `backend/gateway/`. The eight backend services are eight standalone Gradle projects (each with its own `settings.gradle.kts`, `build.gradle.kts`, and Gradle Wrapper) inside the Git monorepo; there is no centralized root Gradle project. A separate pnpm workspace manages `apps/{web,mobile}` and `packages/*`. Each service requires its own `@SpringBootApplication`, JAR, container image, Kubernetes Deployment, and Flyway database migration set.
+The gateway may live at `backend/gateway/`. The seven target backend services (`P5-DEC-01`; `appointment` merged into `store-management`) are standalone Gradle projects (each with its own `settings.gradle.kts`, `build.gradle.kts`, and Gradle Wrapper) inside the Git monorepo; there is no centralized root Gradle project. A separate pnpm workspace manages `apps/{web,mobile}` and `packages/*`. Each service requires its own `@SpringBootApplication`, JAR, container image, Kubernetes Deployment, and Flyway database migration set.
 
 ## Within each Spring service
 Prefer package-by-feature, with `api/`, `application/`, `domain/`, `infrastructure/` under each business feature. Use explicit application use cases and domain invariants. Controller DTOs are not JPA entities; external adapters should not leak into the domain. Avoid gratuitous separate Gradle subprojects for every package.
